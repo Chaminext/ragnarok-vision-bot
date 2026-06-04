@@ -63,6 +63,17 @@ SKILL_CLICAR_ALVO = True
 SKILL_CLICK_DELAY_S = 0.06
 SKILL_POS_CAST_S = 0.35
 
+# Filtro contra "visao de raio-x": ignora mobs vistos atras de parede.
+LOS_MOB_ATIVO = True
+LOS_MIN_PCT = 0.70
+
+# Watchdog de aproximacao: se a distancia nao cai, o alvo provavelmente e
+# inalcançavel por parede/colisao.
+APROX_WATCH_ATIVO = True
+APROX_WATCH_TENTATIVAS = 6
+APROX_WATCH_MIN_DELTA = 20
+APROX_WATCH_RAIO = 160
+
 # Limpeza de cliente Ragnarok: usa Alt+1 configurado como @refresh.
 REFRESH_ATIVO = True
 REFRESH_COOLDOWN_S = 45
@@ -241,6 +252,8 @@ _mov_frame_ant       = None  # frame anterior para detector por movimento
 _walk_cache_key      = None
 _walk_cache_mask     = None
 _walk_cache_frame    = None
+_aprox_watch         = {"x": None, "y": None, "dist": None, "fails": 0}
+_aprox_bloqueado     = False
 
 HIST_RAIO  = 120   # px — raio de exclusao do historico de exploracao
 HIST_TEMPO = 90    # segundos
@@ -891,11 +904,24 @@ def detectar_mobs(frame, j):
             if not _blacklist_check(mx, my)
             and not (abs(mx - cx_mouse) < CURSOR_RAIO_IGNORE
                      and abs(my - cy_mouse) < CURSOR_RAIO_IGNORE)]
+    if LOS_MOB_ATIVO:
+        mobs = [(mx, my) for mx, my in mobs
+                if alvo_com_los(frame, j, mx, my)]
     return mobs
 
 def dentro_da_janela(j, x, y, margem=0):
     return (j.left + margem <= x < j.right - margem and
             j.top + margem <= y < j.bottom - margem)
+
+def alvo_com_los(frame, j, x, y):
+    rx, ry = x - j.left, y - j.top
+    h, w = frame.shape[:2]
+    if not (0 <= rx < w and 0 <= ry < h):
+        return False
+    walk = _mapa_caminhavel(frame, incluir_personagem=True)
+    cx, cy = w // 2, h // 2
+    _, pct = _linha_caminhavel(walk, cx, cy, rx, ry)
+    return pct >= LOS_MIN_PCT
 
 def mob_ainda_vivo(hwnd, j, ax, ay, raio=80):
     """Verifica se ainda tem mob na posicao do alvo."""
@@ -935,11 +961,50 @@ def distancia_do_personagem(j, x, y):
     cy = (j.top + j.bottom) // 2
     return ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
 
+def _aprox_watch_reset():
+    _aprox_watch.update({"x": None, "y": None, "dist": None, "fails": 0})
+
+def _aprox_watch_update(ax, ay, dist):
+    if not APROX_WATCH_ATIVO:
+        return False
+    last_x = _aprox_watch["x"]
+    last_y = _aprox_watch["y"]
+    last_dist = _aprox_watch["dist"]
+    mesmo_alvo = (
+        last_x is not None and last_y is not None and
+        abs(ax - last_x) < APROX_WATCH_RAIO and
+        abs(ay - last_y) < APROX_WATCH_RAIO
+    )
+
+    if mesmo_alvo and last_dist is not None:
+        ganho = last_dist - dist
+        if ganho < APROX_WATCH_MIN_DELTA:
+            _aprox_watch["fails"] += 1
+        else:
+            _aprox_watch["fails"] = 0
+    else:
+        _aprox_watch["fails"] = 0
+
+    _aprox_watch["x"] = ax
+    _aprox_watch["y"] = ay
+    _aprox_watch["dist"] = dist
+    return _aprox_watch["fails"] >= APROX_WATCH_TENTATIVAS
+
 def aproximar_ate_range(hwnd, j, ax, ay):
     """Se estiver fora do range, faz um passo e devolve ao loop principal."""
+    global _aprox_bloqueado
+    _aprox_bloqueado = False
     dist = distancia_do_personagem(j, ax, ay)
     if dist <= COMBATE_RANGE_PX:
+        _aprox_watch_reset()
         return ax, ay, True
+
+    if _aprox_watch_update(ax, ay, dist):
+        _blacklist_add(ax, ay)
+        _aprox_bloqueado = True
+        print(f"  [PATH] Alvo inalcançavel ({dist:.0f}px sem progresso); blacklist temporaria")
+        _aprox_watch_reset()
+        return ax, ay, False
 
     cx = (j.left + j.right) // 2
     cy = (j.top + j.bottom) // 2
@@ -1081,6 +1146,8 @@ def combater_com_persistencia(hwnd, j, ax, ay):
 
         ax, ay, em_range = aproximar_ate_range(hwnd, j, ax, ay)
         if not em_range:
+            if _aprox_bloqueado:
+                return "blocked"
             return None
 
         rotacao_skills(j, ciclo, ax, ay)
@@ -1606,7 +1673,9 @@ def loop(hwnd, j):
 
                 ciclo_morte = combater_com_persistencia(hwnd, j, ax, ay)
 
-                if ciclo_morte:
+                if ciclo_morte == "blocked":
+                    print("  [PATH] Alvo ignorado por colisao/parede; sem refresh")
+                elif ciclo_morte:
                     kills += 1
                     if log: log.kill(ax, ay, ciclo_morte)
                     print(f"  [KILL] #{kills}  ({int(time.time()-inicio)}s)")
