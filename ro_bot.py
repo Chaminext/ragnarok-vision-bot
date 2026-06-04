@@ -54,10 +54,10 @@ ALVO_APROX_FATOR = 0.28
 
 # Sincronia de combate 2.5D: nao dispare skill enquanto ainda esta fora
 # de alcance ou no meio da animacao de movimento.
-COMBATE_RANGE_PX = 170
-COMBATE_MAX_APROX = 3
-COMBATE_APROX_FATOR = 0.42
-COMBATE_MOVE_SETTLE_S = 0.45
+COMBATE_RANGE_PX = 235
+COMBATE_MAX_APROX = 4
+COMBATE_APROX_FATOR = 0.72
+COMBATE_MOVE_SETTLE_S = 0.22
 SKILL_CLICAR_ALVO = True
 SKILL_CLICK_DELAY_S = 0.06
 SKILL_POS_CAST_S = 0.35
