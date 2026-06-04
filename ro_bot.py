@@ -120,8 +120,8 @@ COMBATE_WAYPOINT_CELLS = 10
 ROI_DIREITA_MAX = 0.78
 EXPLORAR_X_MAX = 0.74
 EXPLORAR_HEADING_ATIVO = True
-EXPLORAR_HEADING_TEMPO = 14.0
-EXPLORAR_HEADING_BONUS = 180
+EXPLORAR_HEADING_TEMPO = 24.0
+EXPLORAR_HEADING_BONUS = 420
 
 # Watchdog de aproximacao: se a distancia nao cai, o alvo provavelmente e
 # inalcanÃ§avel por parede/colisao.
@@ -1546,9 +1546,11 @@ def _planejar_exploracao_visual(j, frame, sem_mob=0):
             if heading is not None and sem_mob >= 3:
                 cand_ang = float(np.arctan2(y - cy, x - cx))
                 diff = _angle_diff(cand_ang, heading)
+                if sem_mob < 24 and diff > (np.pi * 0.72):
+                    continue
                 score += max(0.0, 1.0 - diff / np.pi) * EXPLORAR_HEADING_BONUS
-                if sem_mob < 18 and diff > (np.pi * 0.58):
-                    score -= EXPLORAR_HEADING_BONUS * 0.55
+                if diff > (np.pi * 0.50):
+                    score -= EXPLORAR_HEADING_BONUS * 0.75
             score -= hist_penalty
             score += random.random() * 20
             destino = (score, x, y, caminho, linha_ok)
@@ -1563,7 +1565,8 @@ def _planejar_exploracao_visual(j, frame, sem_mob=0):
         return None
 
     candidatos.sort(key=lambda item: item[0], reverse=True)
-    escolha_top = candidatos[:min(4, len(candidatos))]
+    top_n = 2 if heading is not None else 4
+    escolha_top = candidatos[:min(top_n, len(candidatos))]
     _, x, y, caminho, linha_ok = random.choice(escolha_top)
     _explore_heading_set(cx, cy, x, y)
     if linha_ok:
@@ -1982,9 +1985,15 @@ def explorar(j, frame=None, sem_mob=0):
 
     # Tenta ate 12 direcoes â€” prioriza pixel caminhavel e posicao nao visitada
     tx, ty, ok = cx, cy, False
+    heading = _explore_heading_get()
     for tentativa in range(12):
-        dx = random.choice([-1, 1]) * random.randint(*dx_range)
-        dy = random.choice([-1, 1]) * random.randint(*dy_range)
+        if heading is not None and sem_mob >= 3:
+            ang = heading + random.uniform(-0.38, 0.38)
+            dx = int(np.cos(ang) * random.randint(*dx_range))
+            dy = int(np.sin(ang) * random.randint(*dy_range))
+        else:
+            dx = random.choice([-1, 1]) * random.randint(*dx_range)
+            dy = random.choice([-1, 1]) * random.randint(*dy_range)
         tx = max(tx_min, min(tx_max, cx + dx))
         ty = max(ty_min, min(ty_max, cy + dy))
         ok = (frame is None) or _pixel_caminhavel(frame, j, tx, ty)
