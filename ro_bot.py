@@ -90,7 +90,7 @@ VISUAL_LOG_PASTA    = "visual_log"
 VISUAL_LOG_VIDEO    = os.environ.get("RO_VISUAL_LOG_VIDEO", "1").lower() in ("1", "true", "yes", "on")
 VISUAL_LOG_FPS      = 4      # FPS do video gerado (4 = 1 frame a cada 250ms)
 # Eventos que disparam screenshot (remova os que nao quiser)
-VISUAL_LOG_EVENTOS  = {"MOB", "MOVE", "SKILL", "KILL", "PATH", "STUCK",
+VISUAL_LOG_EVENTOS  = {"MOB", "MOVE", "SKILL", "KILL", "PATH", "STUCK", "EXPLORE",
                         "BLIND_ATTACK", "LOOT"}
 
 # â”€â”€ Scan assincrono (thread dedicada de deteccao) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -119,6 +119,9 @@ COMBATE_USAR_WAYPOINT = True
 COMBATE_WAYPOINT_CELLS = 10
 ROI_DIREITA_MAX = 0.78
 EXPLORAR_X_MAX = 0.74
+EXPLORAR_HEADING_ATIVO = True
+EXPLORAR_HEADING_TEMPO = 14.0
+EXPLORAR_HEADING_BONUS = 180
 
 # Watchdog de aproximacao: se a distancia nao cai, o alvo provavelmente e
 # inalcanÃ§avel por parede/colisao.
@@ -319,6 +322,7 @@ _aprox_watch         = {"x": None, "y": None, "dist": None, "fails": 0}
 _aprox_bloqueado     = False
 _explore_until       = 0.0
 _explore_dest        = None
+_explore_heading     = None  # (angulo_rad, timestamp) da direcao recente de varredura
 _alvo_lock           = None  # (ax, ay) do alvo travado na sessao de combate atual
 _alvo_lock_t         = 0.0   # timestamp de quando o lock foi criado
 _track_ids           = {}    # (mx, my) -> track_id da ultima deteccao YOLO
@@ -1511,6 +1515,7 @@ def _planejar_exploracao_visual(j, frame, sem_mob=0):
     ty_min = int(h * 0.12)
     ty_max = int(h * 0.82)
     raio_min, raio_max = (300, 620) if sem_mob > 20 else (170, 430)
+    heading = _explore_heading_get()
 
     candidatos = []
     candidatos_visitados = []
@@ -1538,6 +1543,12 @@ def _planejar_exploracao_visual(j, frame, sem_mob=0):
             score = dist_wall[y, x] * 5 + dist_centro * 0.18 + linha_pct * 120
             if linha_ok:
                 score += 80
+            if heading is not None and sem_mob >= 3:
+                cand_ang = float(np.arctan2(y - cy, x - cx))
+                diff = _angle_diff(cand_ang, heading)
+                score += max(0.0, 1.0 - diff / np.pi) * EXPLORAR_HEADING_BONUS
+                if sem_mob < 18 and diff > (np.pi * 0.58):
+                    score -= EXPLORAR_HEADING_BONUS * 0.55
             score -= hist_penalty
             score += random.random() * 20
             destino = (score, x, y, caminho, linha_ok)
@@ -1554,6 +1565,7 @@ def _planejar_exploracao_visual(j, frame, sem_mob=0):
     candidatos.sort(key=lambda item: item[0], reverse=True)
     escolha_top = candidatos[:min(4, len(candidatos))]
     _, x, y, caminho, linha_ok = random.choice(escolha_top)
+    _explore_heading_set(cx, cy, x, y)
     if linha_ok:
         return j.left + x, j.top + y, True
 
@@ -1653,6 +1665,26 @@ def _hist_check(x, y):
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  LOG VISUAL â€” screenshots anotados + compilacao em video
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+def _angle_diff(a, b):
+    return abs((a - b + np.pi) % (2 * np.pi) - np.pi)
+
+def _explore_heading_get():
+    if not EXPLORAR_HEADING_ATIVO or _explore_heading is None:
+        return None
+    ang, ts = _explore_heading
+    if time.time() - ts > EXPLORAR_HEADING_TEMPO:
+        return None
+    return ang
+
+def _explore_heading_set(cx, cy, x, y):
+    global _explore_heading
+    if EXPLORAR_HEADING_ATIVO:
+        _explore_heading = (float(np.arctan2(y - cy, x - cx)), time.time())
+
+def _explore_heading_reset():
+    global _explore_heading
+    _explore_heading = None
 
 _vlog_pasta   = None   # pasta da sessao atual (criada em vlog_iniciar)
 _vlog_seq     = 0      # numero sequencial do proximo frame
@@ -1963,6 +1995,7 @@ def explorar(j, frame=None, sem_mob=0):
             break   # aceita posicao visitada se nao ha alternativa
 
     _hist_add(tx, ty)
+    _explore_heading_set(cx, cy, tx, ty)
     passo_estereo(j, tx, ty)
     return tx, ty, ok
 
@@ -2250,8 +2283,12 @@ def loop(hwnd, j):
                     if REFRESH_APOS_STUCK:
                         forcar_refresh(j, "stuck")
                     _hist_explore.clear()
+                    _explore_heading_reset()
                     tx, ty, ok = explorar(j, frame, sem_mob=30)
                     if log: log.explore(tx, ty, ok)
+                    vlog_frame(frame, j, "EXPLORE",
+                               info=f"stuck_jump ok={ok}",
+                               estado_nome=estado.value, waypoint_xy=(tx, ty))
                     _explore_dest  = (tx, ty)
                     _explore_until = time.time() + EXPLORAR_SETTLE_LONGO_S
                     continue
@@ -2261,6 +2298,7 @@ def loop(hwnd, j):
                     sem_mob = 0
                     _explore_until = 0.0
                     _explore_dest  = None
+                    _explore_heading_reset()
 
                     # Prioriza mob com menor HP quando ha varios
                     ax, ay = mobs[0]
@@ -2306,6 +2344,9 @@ def loop(hwnd, j):
                         print(f"  [BUSCAR] Explorando ({sem_mob}x sem mob)...")
                     tx, ty, ok = explorar(j, frame, sem_mob)
                     if log: log.explore(tx, ty, ok)
+                    vlog_frame(frame, j, "EXPLORE",
+                               info=f"sem_mob={sem_mob} ok={ok}",
+                               estado_nome=estado.value, waypoint_xy=(tx, ty))
                     _explore_dest  = (tx, ty)
                     _explore_until = time.time() + (EXPLORAR_SETTLE_LONGO_S if sem_mob > 20 else EXPLORAR_SETTLE_S)
 
