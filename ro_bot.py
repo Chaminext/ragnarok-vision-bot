@@ -42,8 +42,15 @@ ROTACAO = [
 ]
 
 MAX_CICLOS_ATAQUE = 5    # maximo de rotacoes por mob antes de desistir
-DELAY_PASSO       = 0.3
+DELAY_PASSO       = 0.18
 DELAY_LOOT        = 0.15
+
+# Persistencia de alvo: YOLO pode piscar durante movimento/animacao. Nao
+# transforme 1 frame sem bbox em SKIP+blacklist.
+ALVO_GRACE_S = 1.8
+ALVO_RECHECK_S = 0.15
+ALVO_REAQUIRE_RAIO = 190
+ALVO_APROX_FATOR = 0.28
 
 TEMPLATES_DIR  = "templates"
 THRESHOLD      = 0.72   # 0.75 perdia mobs reais; 0.65 gerava falsos positivos
@@ -853,6 +860,33 @@ def mob_ainda_vivo(hwnd, j, ax, ay, raio=80):
     mobs  = detectar_mobs(frame, j)
     return any(abs(mx-ax) < raio and abs(my-ay) < raio for mx, my in mobs)
 
+def _mob_perto(mobs, ax, ay, raio=ALVO_REAQUIRE_RAIO):
+    if not mobs:
+        return None
+    candidatos = []
+    for mx, my in mobs:
+        d2 = (mx - ax) ** 2 + (my - ay) ** 2
+        if d2 <= raio ** 2:
+            candidatos.append((d2, mx, my))
+    if not candidatos:
+        return None
+    candidatos.sort(key=lambda item: item[0])
+    return candidatos[0][1], candidatos[0][2]
+
+def aguardar_reaquisicao(hwnd, j, ax, ay, timeout=ALVO_GRACE_S):
+    fim = time.time() + timeout
+    ultimo = None
+    while rodando and time.time() < fim:
+        frame = capturar_cv(hwnd, j)
+        mobs = detectar_mobs(frame, j)
+        alvo = _mob_perto(mobs, ax, ay)
+        if alvo:
+            return alvo, len(mobs)
+        if mobs:
+            ultimo = mobs[0], len(mobs)
+        time.sleep(ALVO_RECHECK_S)
+    return ultimo if ultimo else (None, 0)
+
 # ── click e acoes ─────────────────────────────────────────
 
 def mouse_click(x, y):
@@ -861,6 +895,13 @@ def mouse_click(x, y):
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
     time.sleep(0.05)
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP,   0, 0, 0, 0)
+
+def parar_movimento(j):
+    """Interrompe clique de exploracao anterior clicando perto do personagem."""
+    cx = (j.left + j.right) // 2
+    cy = (j.top + j.bottom) // 2
+    mouse_click(cx, cy)
+    time.sleep(0.08)
 
 def passo_estereo(j, x, y):
     focar(j)
@@ -920,6 +961,60 @@ def combater(hwnd, j, ax, ay):
             return ciclo
 
     print(f"  [MISS] Mob sobreviveu {MAX_CICLOS_ATAQUE} ciclos — pulando")
+    if log: log.miss(ax, ay)
+    return False
+
+def combater_com_persistencia(hwnd, j, ax, ay):
+    """
+    Combate com debounce de visao.
+    Retorna int=kill, False=miss confirmado, None=alvo piscou/nao blacklistar.
+    """
+    frame_pre = capturar_cv(hwnd, j)
+    mobs_pre_lista = detectar_mobs(frame_pre, j)
+    alvo_pre = _mob_perto(mobs_pre_lista, ax, ay)
+    if alvo_pre:
+        ax, ay = alvo_pre
+    elif mobs_pre_lista:
+        ax, ay = mobs_pre_lista[0]
+
+    mobs_pre = len(mobs_pre_lista)
+    if mobs_pre == 0:
+        print("  [LOCK] Alvo sumiu apos mover; aguardando reacquisicao...")
+        alvo, qtd = aguardar_reaquisicao(hwnd, j, ax, ay)
+        if alvo:
+            ax, ay = alvo
+            mobs_pre = max(1, qtd)
+            print(f"  [LOCK] Alvo reacquirido em ({ax},{ay})")
+        else:
+            print("  [SKIP] Alvo nao confirmado; sem blacklist")
+            if log: log.skip(ax, ay)
+            return None
+
+    for ciclo in range(1, MAX_CICLOS_ATAQUE + 1):
+        if not rodando:
+            return None
+
+        rotacao_skills(j, ciclo)
+        frame_pos = capturar_cv(hwnd, j)
+        mobs_pos_lista = detectar_mobs(frame_pos, j)
+        alvo_pos = _mob_perto(mobs_pos_lista, ax, ay)
+        mobs_pos = len(mobs_pos_lista)
+
+        if mobs_pos < mobs_pre:
+            print(f"  [KILL] Mob morreu no ciclo {ciclo}")
+            return ciclo
+
+        if not alvo_pos:
+            alvo, qtd = aguardar_reaquisicao(hwnd, j, ax, ay, timeout=0.8)
+            if alvo:
+                ax, ay = alvo
+                mobs_pre = max(1, qtd)
+                print(f"  [LOCK] Mantendo alvo em ({ax},{ay})")
+                continue
+            print(f"  [KILL?] Alvo desapareceu apos ataque no ciclo {ciclo}")
+            return ciclo
+
+    print(f"  [MISS] Mob sobreviveu {MAX_CICLOS_ATAQUE} ciclos - pulando")
     if log: log.miss(ax, ay)
     return False
 
@@ -1402,17 +1497,18 @@ def loop(hwnd, j):
                 qtd     = len(mobs)
                 print(f"  [MOB] ({ax},{ay}) — {qtd} visivel(is)")
                 if log: log.mob(ax, ay, qtd)
+                parar_movimento(j)
 
                 # Teleporta 40% do caminho: mob fica a ~60% de distancia
                 # do personagem — longe o suficiente para ficar fora da mascara central
                 cx_w = (j.left + j.right) // 2
                 cy_w = (j.top  + j.bottom) // 2
-                tx_m = int(cx_w + (ax - cx_w) * 0.40)
-                ty_m = int(cy_w + (ay - cy_w) * 0.40)
+                tx_m = int(cx_w + (ax - cx_w) * ALVO_APROX_FATOR)
+                ty_m = int(cy_w + (ay - cy_w) * ALVO_APROX_FATOR)
                 passo_estereo(j, tx_m, ty_m)
                 if log: log.move(ax, ay)
 
-                ciclo_morte = combater(hwnd, j, ax, ay)
+                ciclo_morte = combater_com_persistencia(hwnd, j, ax, ay)
 
                 if ciclo_morte:
                     kills += 1
@@ -1420,9 +1516,11 @@ def loop(hwnd, j):
                     print(f"  [KILL] #{kills}  ({int(time.time()-inicio)}s)")
                     lotar_area(j, ax, ay)
                     if log: log.loot(ax, ay)
-                else:
+                elif ciclo_morte is False:
                     _blacklist_add(ax, ay)
                     print(f"  [BL]   Posicao ({ax},{ay}) bloqueada por {BLACKLIST_TEMPO}s")
+                else:
+                    print("  [LOCK] Alvo perdido temporariamente; sem blacklist")
 
             else:
                 sem_mob += 1
