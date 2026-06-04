@@ -1620,6 +1620,7 @@ def modo_verificar(hwnd, j):
     carregar_templates()
     carregar_yolo()
     print("[VERIFICAR] Q=sair  |  mostra template+score em cada deteccao")
+    nome_janela = "Verificar (azul=mascara  vermelho=mob  Q=sair)"
     while True:
         frame  = capturar_cv(hwnd, j)
         # Usa com_info=True para mostrar nome e score de cada deteccao
@@ -1678,8 +1679,20 @@ def modo_verificar(hwnd, j):
                     (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
         cv2.putText(vis, f"HP={hp_lido:.0%}  SP={sp_lido:.0%}  | vermelho=bloq  verde=chao  azul=prox passo",
                     (8, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.imshow("Verificar (azul=mascara  vermelho=mob  Q=sair)", vis)
-        if cv2.waitKey(30) & 0xFF == ord("q"):
+        cv2.imshow(nome_janela, vis)
+        key = cv2.waitKey(30) & 0xFF
+        if key in (ord("q"), ord("Q"), 27):
+            break
+        try:
+            import keyboard
+            if keyboard.is_pressed("q") or keyboard.is_pressed("esc"):
+                break
+        except Exception:
+            pass
+        try:
+            if cv2.getWindowProperty(nome_janela, cv2.WND_PROP_VISIBLE) < 1:
+                break
+        except Exception:
             break
     cv2.destroyAllWindows()
 
