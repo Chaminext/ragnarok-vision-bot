@@ -52,6 +52,16 @@ ALVO_RECHECK_S = 0.15
 ALVO_REAQUIRE_RAIO = 190
 ALVO_APROX_FATOR = 0.28
 
+# Sincronia de combate 2.5D: nao dispare skill enquanto ainda esta fora
+# de alcance ou no meio da animacao de movimento.
+COMBATE_RANGE_PX = 170
+COMBATE_MAX_APROX = 3
+COMBATE_APROX_FATOR = 0.42
+COMBATE_MOVE_SETTLE_S = 0.45
+SKILL_CLICAR_ALVO = True
+SKILL_CLICK_DELAY_S = 0.06
+SKILL_POS_CAST_S = 0.35
+
 TEMPLATES_DIR  = "templates"
 THRESHOLD      = 0.72   # 0.75 perdia mobs reais; 0.65 gerava falsos positivos
 TEMPLATE_RAIO  = 32
@@ -910,6 +920,36 @@ def aguardar_reaquisicao(hwnd, j, ax, ay, timeout=ALVO_GRACE_S):
         time.sleep(ALVO_RECHECK_S)
     return ultimo if ultimo else (None, 0)
 
+def distancia_do_personagem(j, x, y):
+    cx = (j.left + j.right) // 2
+    cy = (j.top + j.bottom) // 2
+    return ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+
+def aproximar_ate_range(hwnd, j, ax, ay):
+    """Move em passos curtos ate o alvo estar em range de skill."""
+    for tentativa in range(COMBATE_MAX_APROX + 1):
+        dist = distancia_do_personagem(j, ax, ay)
+        if dist <= COMBATE_RANGE_PX:
+            return ax, ay, True
+
+        if tentativa >= COMBATE_MAX_APROX:
+            print(f"  [RANGE] Alvo ainda longe ({dist:.0f}px); adiando ataque")
+            return ax, ay, False
+
+        cx = (j.left + j.right) // 2
+        cy = (j.top + j.bottom) // 2
+        tx = int(cx + (ax - cx) * COMBATE_APROX_FATOR)
+        ty = int(cy + (ay - cy) * COMBATE_APROX_FATOR)
+        print(f"  [RANGE] Aproximando ({dist:.0f}px -> alvo)")
+        passo_estereo(j, tx, ty)
+        time.sleep(COMBATE_MOVE_SETTLE_S)
+
+        alvo, _ = aguardar_reaquisicao(hwnd, j, ax, ay, timeout=0.7)
+        if alvo:
+            ax, ay = alvo
+
+    return ax, ay, distancia_do_personagem(j, ax, ay) <= COMBATE_RANGE_PX
+
 # ── click e acoes ─────────────────────────────────────────
 
 def mouse_click(x, y):
@@ -935,16 +975,22 @@ def passo_estereo(j, x, y):
     mouse_click(x, y)
     time.sleep(DELAY_PASSO)
 
-def rotacao_skills(j, ciclo=0):
+def rotacao_skills(j, ciclo=0, ax=None, ay=None):
     """Executa uma rotacao completa de skills."""
     focar(j)
     pyautogui.press(TECLA_TAB)
     time.sleep(0.08)
+    if ax is not None and ay is not None:
+        win32api.SetCursorPos((ax, ay))
+        time.sleep(0.05)
     for tecla, delay in ROTACAO:
         if not rodando: return
         pyautogui.press(tecla)
+        if SKILL_CLICAR_ALVO and ax is not None and ay is not None:
+            time.sleep(SKILL_CLICK_DELAY_S)
+            mouse_click(ax, ay)
         if log: log.skill(tecla, ciclo)
-        time.sleep(delay)
+        time.sleep(delay + SKILL_POS_CAST_S)
 
 def lotar_area(j, ax, ay):
     """Move ate o loot e pressiona a tecla de coletar."""
@@ -1017,7 +1063,11 @@ def combater_com_persistencia(hwnd, j, ax, ay):
         if not rodando:
             return None
 
-        rotacao_skills(j, ciclo)
+        ax, ay, em_range = aproximar_ate_range(hwnd, j, ax, ay)
+        if not em_range:
+            return None
+
+        rotacao_skills(j, ciclo, ax, ay)
         frame_pos = capturar_cv(hwnd, j)
         mobs_pos_lista = detectar_mobs(frame_pos, j)
         alvo_pos = _mob_perto(mobs_pos_lista, ax, ay)
