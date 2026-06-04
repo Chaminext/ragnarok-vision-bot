@@ -1613,10 +1613,12 @@ def loop(hwnd, j):
                     lotar_area(j, ax, ay)
                     if log: log.loot(ax, ay)
                 elif ciclo_morte is False:
-                    _blacklist_add(ax, ay)
-                    print(f"  [BL]   Posicao ({ax},{ay}) bloqueada por {BLACKLIST_TEMPO}s")
-                    if REFRESH_APOS_MISS:
-                        forcar_refresh(j, "miss")
+                    refreshed = REFRESH_APOS_MISS and forcar_refresh(j, "miss")
+                    if refreshed:
+                        print("  [MISS] Refresh acionado; sem blacklist para possivel sprite fantasma")
+                    else:
+                        _blacklist_add(ax, ay)
+                        print(f"  [BL]   Posicao ({ax},{ay}) bloqueada por {BLACKLIST_TEMPO}s")
                 else:
                     print("  [LOCK] Recalculando alvo no proximo frame; sem blacklist")
 
