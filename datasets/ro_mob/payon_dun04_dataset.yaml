@@ -1,0 +1,15 @@
+path: datasets/ro_mob
+train: images/train
+val: images/val
+
+names:
+  0: am_mut
+  1: archer_skeleton
+  2: furious_dokebi
+  3: cat_o_nine_tails
+  4: dokebi
+  5: greatest_general
+  6: horong
+  7: moonlight_flower
+  8: nine_tail
+  9: skeleton_general

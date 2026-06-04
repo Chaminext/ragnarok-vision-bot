@@ -1,0 +1,181 @@
+{
+  "profile": "payon_dun04",
+  "map": "pay_dun04",
+  "name": "Caverna de Payon - ultimo piso",
+  "source": {
+    "primary": "https://ragnarok-db.com/maps/info/?map=pay_dun04",
+    "secondary": "https://rune-nifelheim.com/mapa/pay_dun04/",
+    "notes": "Perfil inicial para teste YOLO por mapa. Plantas ficam fora das classes de ataque."
+  },
+  "switch_slots": {
+    "neutral": "",
+    "water": "",
+    "earth": "",
+    "fire": "",
+    "wind": "",
+    "poison": "",
+    "holy": "",
+    "dark": "",
+    "ghost": "",
+    "undead": ""
+  },
+  "mobs": [
+    {
+      "class_id": 0,
+      "class_name": "am_mut",
+      "name_pt": "Am Mut",
+      "divine_pride_id": 1301,
+      "amount": 1,
+      "element": "dark",
+      "element_level": 1,
+      "recommended_attack_element": "holy",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 1,
+      "class_name": "archer_skeleton",
+      "name_pt": "Esqueleto Arqueiro",
+      "name_en": "Archer Skeleton",
+      "divine_pride_id": 1016,
+      "amount": 15,
+      "element": "undead",
+      "element_level": 1,
+      "recommended_attack_element": "holy",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 2,
+      "class_name": "furious_dokebi",
+      "name_pt": "Dokebi Furioso",
+      "name_en": "Furious Dokebi",
+      "divine_pride_id": 2851,
+      "amount": 2,
+      "element": "",
+      "element_level": null,
+      "recommended_attack_element": "",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 3,
+      "class_name": "cat_o_nine_tails",
+      "name_pt": "Gato de Nove Caudas",
+      "name_en": "Cat O' Nine Tails",
+      "divine_pride_id": 1307,
+      "amount": 1,
+      "element": "fire",
+      "element_level": 3,
+      "recommended_attack_element": "water",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 4,
+      "class_name": "dokebi",
+      "name_pt": "Dokebi",
+      "divine_pride_id": 1491,
+      "amount": 40,
+      "element": "",
+      "element_level": null,
+      "recommended_attack_element": "",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 5,
+      "class_name": "greatest_general",
+      "name_pt": "General Maior",
+      "name_en": "Greatest General",
+      "divine_pride_id": 1277,
+      "amount": 15,
+      "element": "fire",
+      "element_level": 2,
+      "recommended_attack_element": "water",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 6,
+      "class_name": "horong",
+      "name_pt": "Horong",
+      "divine_pride_id": 1129,
+      "amount": 30,
+      "element": "fire",
+      "element_level": 4,
+      "recommended_attack_element": "water",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 7,
+      "class_name": "moonlight_flower",
+      "name_pt": "Flor do Luar",
+      "name_en": "Moonlight Flower",
+      "divine_pride_id": 1150,
+      "amount": 1,
+      "element": "fire",
+      "element_level": 3,
+      "recommended_attack_element": "water",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 8,
+      "class_name": "nine_tail",
+      "name_pt": "Nove Caudas",
+      "name_en": "Nine Tail",
+      "divine_pride_id": 1180,
+      "amount": 30,
+      "element": "fire",
+      "element_level": 3,
+      "recommended_attack_element": "water",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "class_id": 9,
+      "class_name": "skeleton_general",
+      "name_pt": "General Esqueleto",
+      "name_en": "Skeleton General",
+      "divine_pride_id": 1290,
+      "amount": 1,
+      "element": "undead",
+      "element_level": 1,
+      "recommended_attack_element": "holy",
+      "switch_key": "",
+      "enabled": true,
+      "reviewed": false
+    }
+  ],
+  "ignored_mobs": [
+    {
+      "name_pt": "Planta Vermelha",
+      "name_en": "Red Plant",
+      "amount": 10,
+      "reason": "Nao atacar no primeiro teste"
+    },
+    {
+      "name_pt": "Planta Brilhante",
+      "name_en": "Shining Plant",
+      "amount": 2,
+      "reason": "Nao atacar no primeiro teste"
+    },
+    {
+      "name_pt": "Planta Branca",
+      "name_en": "White Plant",
+      "amount": 6,
+      "reason": "Nao atacar no primeiro teste"
+    }
+  ]
+}

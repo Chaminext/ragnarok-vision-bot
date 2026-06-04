@@ -1,0 +1,45 @@
+# Python / local env
+__pycache__/
+*.py[cod]
+.venv*/
+venv/
+env/
+.env
+
+# Runtime logs and debug output
+ro_log_*.log
+*.cache
+
+# Trained weights / downloaded base models
+models/
+yolo*.pt
+*.onnx
+*.engine
+
+# YOLO training outputs
+runs/
+
+# Captured/generated datasets
+datasets/ro_mob/images/
+datasets/ro_mob/labels/
+datasets/ro_mob/archive_before_*/
+datasets/payon_dun04_synth/
+datasets/*_synth/
+
+# Downloaded sprites/assets
+assets/divine_sprites/
+
+# Manual templates and old local experiments
+templates/*.png
+mob_template.png
+ro_screenshot.png
+frames_debug/
+mob_db/
+_archive_unused*/
+
+# Local editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/

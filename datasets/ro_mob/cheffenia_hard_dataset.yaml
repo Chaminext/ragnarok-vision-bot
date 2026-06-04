@@ -1,0 +1,50 @@
+path: datasets/ro_mob
+train: images/train
+val: images/val
+
+names:
+  0: abelha_rainha
+  1: atroce
+  2: boitata
+  3: cavaleiro_da_tempestade
+  4: detale
+  5: doppelganger
+  6: dracula
+  7: drake
+  8: eddga
+  9: egnigem_cenia
+  10: tao_gunka
+  11: farao
+  12: flor_do_luar
+  13: freeoni
+  14: general_tartaruga
+  15: gorynych
+  16: hatii
+  17: senhor_dos_mortos
+  18: lady_branca
+  19: lady_tanee
+  20: leak
+  21: maya
+  22: memoria_de_thanatos
+  23: senhor_das_trevas
+  24: orc_heroi
+  25: osiris
+  26: samurai_encarnado
+  27: rsx_0806
+  28: senhor_dos_orcs
+  29: gtb
+  30: vesper
+  31: amon_ra
+  32: kraken
+  33: kiel_d_01
+  34: valquiria_randgris
+  35: rainha_scaraba
+  36: belzebu
+  37: gioia
+  38: ifrit
+  39: gertie
+  40: flamel
+  41: kathryne
+  42: seyren
+  43: eremes
+  44: vigia_do_tempo

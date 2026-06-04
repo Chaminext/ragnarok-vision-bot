@@ -1,0 +1,7 @@
+ultralytics
+opencv-python
+numpy
+pyautogui
+pygetwindow
+keyboard
+pywin32
