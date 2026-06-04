@@ -46,6 +46,8 @@ ROTACAO = [
 MAX_CICLOS_ATAQUE = 5    # maximo de rotacoes por mob antes de desistir
 DELAY_PASSO       = 0.18
 DELAY_LOOT        = 0.15
+EXPLORAR_SETTLE_S = 1.25
+EXPLORAR_SETTLE_LONGO_S = 1.65
 
 # Persistencia de alvo: YOLO pode piscar durante movimento/animacao. Nao
 # transforme 1 frame sem bbox em SKIP+blacklist.
@@ -261,6 +263,8 @@ _walk_cache_mask     = None
 _walk_cache_frame    = None
 _aprox_watch         = {"x": None, "y": None, "dist": None, "fails": 0}
 _aprox_bloqueado     = False
+_explore_until       = 0.0
+_explore_dest        = None
 
 HIST_RAIO  = 120   # px — raio de exclusao do historico de exploracao
 HIST_TEMPO = 90    # segundos
@@ -1005,7 +1009,7 @@ def _aprox_watch_update(ax, ay, dist):
 
 def aproximar_ate_range(hwnd, j, ax, ay):
     """Se estiver fora do range, faz um passo e devolve ao loop principal."""
-    global _aprox_bloqueado
+    global _aprox_bloqueado, _explore_until
     _aprox_bloqueado = False
     dist = distancia_do_personagem(j, ax, ay)
     if dist <= COMBATE_RANGE_PX:
@@ -1037,6 +1041,7 @@ def aproximar_ate_range(hwnd, j, ax, ay):
     print(f"  [RANGE] Aproximando ({dist:.0f}px -> alvo); recalcula no proximo frame")
     if log: log.move(ax, ay)
     passo_estereo(j, tx, ty)
+    _explore_until = max(_explore_until, time.time() + 0.85)
     time.sleep(COMBATE_MOVE_SETTLE_S)
     return ax, ay, False
 
@@ -1702,7 +1707,7 @@ def modo_verificar(hwnd, j):
 # ══════════════════════════════════════════════════════════
 
 def loop(hwnd, j):
-    global rodando, _ultimo_refresh
+    global rodando, _ultimo_refresh, _explore_until, _explore_dest
 
     print()
     print("=" * 56)
@@ -1752,7 +1757,10 @@ def loop(hwnd, j):
                 if REFRESH_APOS_STUCK:
                     forcar_refresh(j, "stuck")
                 _hist_explore.clear()
-                explorar(j, frame, sem_mob=30)   # sem_mob alto = passo gigante
+                tx, ty, ok = explorar(j, frame, sem_mob=30)   # sem_mob alto = passo gigante
+                if log: log.explore(tx, ty, ok)
+                _explore_dest = (tx, ty)
+                _explore_until = time.time() + EXPLORAR_SETTLE_LONGO_S
                 continue
 
             mobs = detectar_mobs(frame, j)
@@ -1773,6 +1781,8 @@ def loop(hwnd, j):
 
             if mobs:
                 sem_mob = 0
+                _explore_until = 0.0
+                _explore_dest = None
                 ax, ay  = mobs[0]
                 qtd     = len(mobs)
                 if not dentro_da_janela(j, ax, ay):
@@ -1806,11 +1816,16 @@ def loop(hwnd, j):
                 sem_mob += 1
                 if REFRESH_PERIODICO_S and (time.time() - _ultimo_refresh) > REFRESH_PERIODICO_S:
                     forcar_refresh(j, "periodico_buscar")
+                if time.time() < _explore_until:
+                    time.sleep(0.08)
+                    continue
                 if sem_mob % 5 == 0:
                     if log: log.idle(sem_mob)
                     print(f"  [BUSCAR] Explorando ({sem_mob}x sem mob)...")
                 tx, ty, ok = explorar(j, frame, sem_mob)
                 if log: log.explore(tx, ty, ok)
+                _explore_dest = (tx, ty)
+                _explore_until = time.time() + (EXPLORAR_SETTLE_LONGO_S if sem_mob > 20 else EXPLORAR_SETTLE_S)
 
         except pyautogui.FailSafeException:
             print("[STOP] Mouse no canto — encerrado.")
