@@ -1035,6 +1035,7 @@ def aproximar_ate_range(hwnd, j, ax, ay):
             return ax, ay, False
         tx, ty = waypoint
     print(f"  [RANGE] Aproximando ({dist:.0f}px -> alvo); recalcula no proximo frame")
+    if log: log.move(ax, ay)
     passo_estereo(j, tx, ty)
     time.sleep(COMBATE_MOVE_SETTLE_S)
     return ax, ay, False
@@ -1781,16 +1782,6 @@ def loop(hwnd, j):
                 print(f"  [MOB] ({ax},{ay}) — {qtd} visivel(is)")
                 if log: log.mob(ax, ay, qtd)
                 parar_movimento(j)
-
-                # Teleporta 40% do caminho: mob fica a ~60% de distancia
-                # do personagem — longe o suficiente para ficar fora da mascara central
-                cx_w = (j.left + j.right) // 2
-                cy_w = (j.top  + j.bottom) // 2
-                tx_m = int(cx_w + (ax - cx_w) * ALVO_APROX_FATOR)
-                ty_m = int(cy_w + (ay - cy_w) * ALVO_APROX_FATOR)
-                passo_estereo(j, tx_m, ty_m)
-                if log: log.move(ax, ay)
-
                 ciclo_morte = combater_com_persistencia(hwnd, j, ax, ay)
 
                 if ciclo_morte == "blocked":
