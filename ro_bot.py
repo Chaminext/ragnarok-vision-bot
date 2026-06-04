@@ -55,7 +55,6 @@ ALVO_APROX_FATOR = 0.28
 # Sincronia de combate 2.5D: nao dispare skill enquanto ainda esta fora
 # de alcance ou no meio da animacao de movimento.
 COMBATE_RANGE_PX = 235
-COMBATE_MAX_APROX = 4
 COMBATE_APROX_FATOR = 0.72
 COMBATE_MOVE_SETTLE_S = 0.22
 SKILL_CLICAR_ALVO = True
@@ -926,29 +925,19 @@ def distancia_do_personagem(j, x, y):
     return ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
 
 def aproximar_ate_range(hwnd, j, ax, ay):
-    """Move em passos curtos ate o alvo estar em range de skill."""
-    for tentativa in range(COMBATE_MAX_APROX + 1):
-        dist = distancia_do_personagem(j, ax, ay)
-        if dist <= COMBATE_RANGE_PX:
-            return ax, ay, True
+    """Se estiver fora do range, faz um passo e devolve ao loop principal."""
+    dist = distancia_do_personagem(j, ax, ay)
+    if dist <= COMBATE_RANGE_PX:
+        return ax, ay, True
 
-        if tentativa >= COMBATE_MAX_APROX:
-            print(f"  [RANGE] Alvo ainda longe ({dist:.0f}px); adiando ataque")
-            return ax, ay, False
-
-        cx = (j.left + j.right) // 2
-        cy = (j.top + j.bottom) // 2
-        tx = int(cx + (ax - cx) * COMBATE_APROX_FATOR)
-        ty = int(cy + (ay - cy) * COMBATE_APROX_FATOR)
-        print(f"  [RANGE] Aproximando ({dist:.0f}px -> alvo)")
-        passo_estereo(j, tx, ty)
-        time.sleep(COMBATE_MOVE_SETTLE_S)
-
-        alvo, _ = aguardar_reaquisicao(hwnd, j, ax, ay, timeout=0.7)
-        if alvo:
-            ax, ay = alvo
-
-    return ax, ay, distancia_do_personagem(j, ax, ay) <= COMBATE_RANGE_PX
+    cx = (j.left + j.right) // 2
+    cy = (j.top + j.bottom) // 2
+    tx = int(cx + (ax - cx) * COMBATE_APROX_FATOR)
+    ty = int(cy + (ay - cy) * COMBATE_APROX_FATOR)
+    print(f"  [RANGE] Aproximando ({dist:.0f}px -> alvo); recalcula no proximo frame")
+    passo_estereo(j, tx, ty)
+    time.sleep(COMBATE_MOVE_SETTLE_S)
+    return ax, ay, False
 
 # ── click e acoes ─────────────────────────────────────────
 
@@ -1597,7 +1586,7 @@ def loop(hwnd, j):
                     _blacklist_add(ax, ay)
                     print(f"  [BL]   Posicao ({ax},{ay}) bloqueada por {BLACKLIST_TEMPO}s")
                 else:
-                    print("  [LOCK] Alvo perdido temporariamente; sem blacklist")
+                    print("  [LOCK] Recalculando alvo no proximo frame; sem blacklist")
 
             else:
                 sem_mob += 1
