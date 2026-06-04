@@ -123,8 +123,8 @@ EXPLORAR_X_MAX = 0.74
 # Watchdog de aproximacao: se a distancia nao cai, o alvo provavelmente e
 # inalcanÃ§avel por parede/colisao.
 APROX_WATCH_ATIVO = True
-APROX_WATCH_TENTATIVAS = 5
-APROX_WATCH_MIN_DELTA = 20
+APROX_WATCH_TENTATIVAS = 3
+APROX_WATCH_MIN_DELTA = 28
 APROX_WATCH_RAIO = 160
 
 # Limpeza de cliente Ragnarok: usa Alt+1 configurado como @refresh.
@@ -529,6 +529,28 @@ def focar(j):
         j.activate(); time.sleep(0.05)
     except Exception:
         pass
+
+def janela_valida(j):
+    try:
+        return j.width >= 500 and j.height >= 300 and j.left > -10000 and j.top > -10000
+    except Exception:
+        return False
+
+def preparar_janela(j, tentativas=5):
+    """Garante geometria real antes de captura/log; evita rect 160x28/-32000."""
+    ultimo = j
+    for i in range(tentativas):
+        try:
+            focar(ultimo)
+            time.sleep(0.15)
+            atual = pegar_janela()
+            if janela_valida(atual):
+                return atual
+            ultimo = atual
+        except Exception:
+            pass
+        time.sleep(0.2 + i * 0.05)
+    return ultimo
 
 # â”€â”€ captura via PrintWindow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -2526,6 +2548,10 @@ if __name__ == "__main__":
     hwnd = pegar_hwnd()
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.02
+    j = preparar_janela(j)
+    if not janela_valida(j):
+        print(f"  [AVISO] Geometria da janela suspeita: {j.left},{j.top} {j.width}x{j.height}")
+        print("  [AVISO] Deixe o jogo visivel e rode novamente se a captura falhar.")
 
     if "--capturar" in sys.argv:
         modo_capturar(hwnd, j)
