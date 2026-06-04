@@ -62,10 +62,14 @@ COMBATE_MOVE_SETTLE_S = 0.22
 SKILL_CLICAR_ALVO = True
 SKILL_CLICK_DELAY_S = 0.06
 SKILL_POS_CAST_S = 0.35
+YOLO_TARGET_Y_RATIO = 0.74
 
 # Filtro contra "visao de raio-x": ignora mobs vistos atras de parede.
 LOS_MOB_ATIVO = True
-LOS_MIN_PCT = 0.70
+LOS_MIN_PCT = 0.84
+CAMINHO_ALVO_MAX_ALONGAMENTO = 2.8
+COMBATE_USAR_WAYPOINT = True
+COMBATE_WAYPOINT_CELLS = 10
 
 # Watchdog de aproximacao: se a distancia nao cai, o alvo provavelmente e
 # inalcançavel por parede/colisao.
@@ -224,6 +228,7 @@ class Logger:
     def stuck(self):               self._w("STUCK",    {})
     def antijail(self, motivo):    self._w("ANTIJAIL", {"motivo": motivo})
     def refresh(self, motivo):      self._w("REFRESH",  {"motivo": motivo})
+    def path(self, ax, ay, motivo): self._w("PATH",     self._xy(ax, ay, {"motivo": motivo}))
 
     def kill(self, ax, ay, ciclos):
         self._kills += 1
@@ -691,8 +696,10 @@ def detectar_por_yolo(frame, j, com_info=False):
         except Exception:
             continue
 
+        # Ragnarok 2.5D interage melhor na base do sprite; o centro da bbox
+        # costuma cair na cabeca/corpo e distorce range/parede.
         mx = int(j.left + (x1 + x2) / 2)
-        my = int(j.top  + (y1 + y2) / 2)
+        my = int(j.top + y1 + (y2 - y1) * YOLO_TARGET_Y_RATIO)
         if _perto_do_mouse(mx, my):
             continue
         if not _pixel_caminhavel(frame, j, mx, my):
@@ -918,10 +925,7 @@ def alvo_com_los(frame, j, x, y):
     h, w = frame.shape[:2]
     if not (0 <= rx < w and 0 <= ry < h):
         return False
-    walk = _mapa_caminhavel(frame, incluir_personagem=True)
-    cx, cy = w // 2, h // 2
-    _, pct = _linha_caminhavel(walk, cx, cy, rx, ry)
-    return pct >= LOS_MIN_PCT
+    return _alvo_tem_caminho(frame, j, x, y)
 
 def mob_ainda_vivo(hwnd, j, ax, ay, raio=80):
     """Verifica se ainda tem mob na posicao do alvo."""
@@ -1010,6 +1014,17 @@ def aproximar_ate_range(hwnd, j, ax, ay):
     cy = (j.top + j.bottom) // 2
     tx = int(cx + (ax - cx) * COMBATE_APROX_FATOR)
     ty = int(cy + (ay - cy) * COMBATE_APROX_FATOR)
+    if COMBATE_USAR_WAYPOINT:
+        frame = capturar_cv(hwnd, j)
+        waypoint = _waypoint_para_alvo(frame, j, ax, ay, dist)
+        if waypoint is None:
+            _blacklist_add(ax, ay)
+            _aprox_bloqueado = True
+            if log: log.path(ax, ay, "sem_caminho")
+            print(f"  [PATH] Sem caminho visual ate o alvo ({dist:.0f}px); blacklist temporaria")
+            _aprox_watch_reset()
+            return ax, ay, False
+        tx, ty = waypoint
     print(f"  [RANGE] Aproximando ({dist:.0f}px -> alvo); recalcula no proximo frame")
     passo_estereo(j, tx, ty)
     time.sleep(COMBATE_MOVE_SETTLE_S)
@@ -1271,6 +1286,81 @@ def _astar_grid(grid, start, goal):
             heapq.heappush(aberto, (prioridade, (nx, ny)))
 
     return None
+
+def _grid_proximo_caminhavel(grid, gx, gy, max_raio=5):
+    gh, gw = grid.shape
+    if 0 <= gx < gw and 0 <= gy < gh and grid[gy, gx]:
+        return gx, gy
+
+    melhor = None
+    for raio in range(1, max_raio + 1):
+        for ny in range(max(0, gy - raio), min(gh, gy + raio + 1)):
+            for nx in range(max(0, gx - raio), min(gw, gx + raio + 1)):
+                if not grid[ny, nx]:
+                    continue
+                d2 = (nx - gx) ** 2 + (ny - gy) ** 2
+                if melhor is None or d2 < melhor[0]:
+                    melhor = (d2, nx, ny)
+        if melhor is not None:
+            return melhor[1], melhor[2]
+    return None
+
+def _caminho_grid_para_alvo(frame, j, tx, ty):
+    h, w = frame.shape[:2]
+    rx, ry = int(tx - j.left), int(ty - j.top)
+    if not (0 <= rx < w and 0 <= ry < h):
+        return None
+
+    walk = _mapa_caminhavel(frame, incluir_personagem=True)
+    grid = _criar_grid_caminhavel(walk)
+    cx, cy = w // 2, h // 2
+    start = (min(grid.shape[1] - 1, max(0, cx // MAPA_GRID)),
+             min(grid.shape[0] - 1, max(0, cy // MAPA_GRID)))
+    goal_raw = (min(grid.shape[1] - 1, max(0, rx // MAPA_GRID)),
+                min(grid.shape[0] - 1, max(0, ry // MAPA_GRID)))
+
+    if not grid[start[1], start[0]]:
+        grid[start[1], start[0]] = True
+    goal = _grid_proximo_caminhavel(grid, goal_raw[0], goal_raw[1])
+    if goal is None:
+        return None
+
+    caminho = _astar_grid(grid, start, goal)
+    if not caminho:
+        return None
+    return walk, caminho, start, goal
+
+def _alvo_tem_caminho(frame, j, tx, ty):
+    plano = _caminho_grid_para_alvo(frame, j, tx, ty)
+    if plano is None:
+        return False
+
+    walk, caminho, _, _ = plano
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2
+    rx, ry = int(tx - j.left), int(ty - j.top)
+    _, linha_pct = _linha_caminhavel(walk, cx, cy, rx, ry)
+    if linha_pct >= LOS_MIN_PCT:
+        return True
+
+    linear = max(1.0, ((rx - cx) ** 2 + (ry - cy) ** 2) ** 0.5)
+    caminho_px = max(1, len(caminho) - 1) * MAPA_GRID
+    return caminho_px <= linear * CAMINHO_ALVO_MAX_ALONGAMENTO
+
+def _waypoint_para_alvo(frame, j, tx, ty, dist):
+    plano = _caminho_grid_para_alvo(frame, j, tx, ty)
+    if plano is None:
+        return None
+
+    _, caminho, _, _ = plano
+    if len(caminho) <= 1:
+        return tx, ty
+
+    passos = min(len(caminho) - 1, max(2, min(COMBATE_WAYPOINT_CELLS, int(dist / MAPA_GRID * 0.55))))
+    wx, wy = caminho[passos]
+    px = int(wx * MAPA_GRID + MAPA_GRID / 2)
+    py = int(wy * MAPA_GRID + MAPA_GRID / 2)
+    return j.left + px, j.top + py
 
 def _planejar_exploracao_visual(j, frame, sem_mob=0):
     h, w = frame.shape[:2]
