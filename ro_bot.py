@@ -141,13 +141,20 @@ ANTIJAIL_CHAT_Y1     = 0.960  # fim da area de chat
 
 class Logger:
     """Registra todos os eventos em JSON-lines para analise com ro_viewer.py"""
-    def __init__(self):
+    def __init__(self, j=None):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.arquivo = f"ro_log_{ts}.log"
         self._t0     = time.time()
         self._kills  = 0
+        self._j      = j
         self._f      = open(self.arquivo, "w", encoding="utf-8")
-        self._w("INICIO", {})
+        dados = {}
+        if j is not None:
+            dados = {
+                "left": j.left, "top": j.top, "right": j.right, "bottom": j.bottom,
+                "width": j.width, "height": j.height,
+            }
+        self._w("INICIO", dados)
         print(f"  [LOG] {self.arquivo}")
 
     def _w(self, tipo, dados):
@@ -163,13 +170,25 @@ class Logger:
         self._f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self._f.flush()
 
-    def mob(self, ax, ay, qtd):    self._w("MOB",    {"x": ax, "y": ay, "qtd": qtd})
-    def move(self, ax, ay):        self._w("MOVE",   {"x": ax, "y": ay})
-    def skip(self, ax, ay):        self._w("SKIP",   {"x": ax, "y": ay})
+    def _xy(self, x, y, extra=None):
+        dados = {"x": x, "y": y}
+        if self._j is not None:
+            rx, ry = x - self._j.left, y - self._j.top
+            dados.update({
+                "rx": rx, "ry": ry,
+                "inside": 0 <= rx < self._j.width and 0 <= ry < self._j.height,
+            })
+        if extra:
+            dados.update(extra)
+        return dados
+
+    def mob(self, ax, ay, qtd):    self._w("MOB",    self._xy(ax, ay, {"qtd": qtd}))
+    def move(self, ax, ay):        self._w("MOVE",   self._xy(ax, ay))
+    def skip(self, ax, ay):        self._w("SKIP",   self._xy(ax, ay))
     def skill(self, tecla, ciclo): self._w("SKILL",  {"k": tecla, "c": ciclo})
-    def miss(self, ax, ay):        self._w("MISS",   {"x": ax, "y": ay})
-    def loot(self, ax, ay):        self._w("LOOT",   {"x": ax, "y": ay})
-    def explore(self, tx, ty, ok): self._w("EXPLORE",{"x": tx, "y": ty, "ok": ok})
+    def miss(self, ax, ay):        self._w("MISS",   self._xy(ax, ay))
+    def loot(self, ax, ay):        self._w("LOOT",   self._xy(ax, ay))
+    def explore(self, tx, ty, ok): self._w("EXPLORE",self._xy(tx, ty, {"ok": ok}))
     def idle(self, n):             self._w("IDLE",   {"n": n})
     def pot(self, tipo, nivel):    self._w("POT",      {"tipo": tipo, "nivel": round(nivel, 2)})
     def morte(self):               self._w("MORTE",    {})
@@ -178,7 +197,7 @@ class Logger:
 
     def kill(self, ax, ay, ciclos):
         self._kills += 1
-        self._w("KILL", {"n": self._kills, "x": ax, "y": ay, "c": ciclos})
+        self._w("KILL", self._xy(ax, ay, {"n": self._kills, "c": ciclos}))
 
     def fim(self, kills, t_s):
         self._w("FIM", {"kills": kills, "t": round(t_s), "max_c": MAX_CICLOS_ATAQUE})
@@ -854,6 +873,10 @@ def detectar_mobs(frame, j):
                      and abs(my - cy_mouse) < CURSOR_RAIO_IGNORE)]
     return mobs
 
+def dentro_da_janela(j, x, y, margem=0):
+    return (j.left + margem <= x < j.right - margem and
+            j.top + margem <= y < j.bottom - margem)
+
 def mob_ainda_vivo(hwnd, j, ax, ay, raio=80):
     """Verifica se ainda tem mob na posicao do alvo."""
     frame = capturar_cv(hwnd, j)
@@ -1495,6 +1518,10 @@ def loop(hwnd, j):
                 sem_mob = 0
                 ax, ay  = mobs[0]
                 qtd     = len(mobs)
+                if not dentro_da_janela(j, ax, ay):
+                    print(f"  [COORD] Alvo fora da janela: abs=({ax},{ay}) win=({j.left},{j.top},{j.right},{j.bottom})")
+                    if log: log.skip(ax, ay)
+                    continue
                 print(f"  [MOB] ({ax},{ay}) — {qtd} visivel(is)")
                 if log: log.mob(ax, ay, qtd)
                 parar_movimento(j)
@@ -1576,7 +1603,7 @@ if __name__ == "__main__":
         print(f"  [AUTO-POT] HP<{HP_MINIMO:.0%} -> {TECLA_POT_HP}  |  SP<{SP_MINIMO:.0%} -> {TECLA_POT_SP}")
         print(f"  [BARRAS]   HP_BAR_Y={HP_BAR_Y}  SP_BAR_Y={SP_BAR_Y}")
         print(f"  [DICA]     Use --verificar para ver as linhas HP/SP e calibrar")
-        log = Logger()
+        log = Logger(j)
         threading.Thread(target=monitor, daemon=True).start()
         try:
             loop(hwnd, j)
