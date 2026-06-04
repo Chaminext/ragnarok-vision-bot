@@ -33,6 +33,8 @@ JANELA      = "4th | Gepard Shield 3.0 (^-_-^)"
 TECLA_PASSO = "f3"
 TECLA_LOOT  = "z"
 TECLA_TAB   = "tab"
+TECLA_REFRESH_MOD = "alt"
+TECLA_REFRESH_KEY = "1"
 
 # Rotacao de skills: (tecla, delay_antes_da_proxima)
 # Ajuste os delays conforme o cooldown de cada skill
@@ -60,6 +62,13 @@ COMBATE_MOVE_SETTLE_S = 0.22
 SKILL_CLICAR_ALVO = True
 SKILL_CLICK_DELAY_S = 0.06
 SKILL_POS_CAST_S = 0.35
+
+# Limpeza de cliente Ragnarok: usa Alt+1 configurado como @refresh.
+REFRESH_ATIVO = True
+REFRESH_COOLDOWN_S = 45
+REFRESH_PERIODICO_S = 240
+REFRESH_APOS_MISS = True
+REFRESH_APOS_STUCK = True
 
 TEMPLATES_DIR  = "templates"
 THRESHOLD      = 0.72   # 0.75 perdia mobs reais; 0.65 gerava falsos positivos
@@ -203,6 +212,7 @@ class Logger:
     def morte(self):               self._w("MORTE",    {})
     def stuck(self):               self._w("STUCK",    {})
     def antijail(self, motivo):    self._w("ANTIJAIL", {"motivo": motivo})
+    def refresh(self, motivo):      self._w("REFRESH",  {"motivo": motivo})
 
     def kill(self, ax, ay, ciclos):
         self._kills += 1
@@ -223,6 +233,7 @@ log             = None
 _blacklist      = []   # [(x, y, t)] — posicoes MISS recentes, ignoradas na deteccao
 _hist_explore        = []   # [(x, y, t)] — historico de exploracao para evitar circulos
 _ultimo_pot          = {"hp": 0.0, "sp": 0.0}
+_ultimo_refresh      = 0.0
 _mapa_fp_ref         = None  # fingerprint do mapa de referencia para detectar jail
 _antijail_contador   = 0     # frames consecutivos com cor suspeita (evita falso positivo)
 _hp_ultimo           = 1.0   # HP do frame anterior para detectar dano recebido
@@ -955,6 +966,22 @@ def parar_movimento(j):
     mouse_click(cx, cy)
     time.sleep(0.08)
 
+def forcar_refresh(j, motivo, ignorar_cooldown=False):
+    global _ultimo_refresh
+    if not REFRESH_ATIVO:
+        return False
+    agora = time.time()
+    if not ignorar_cooldown and (agora - _ultimo_refresh) < REFRESH_COOLDOWN_S:
+        return False
+
+    focar(j)
+    print(f"  [REFRESH] {motivo}")
+    if log: log.refresh(motivo)
+    pyautogui.hotkey(TECLA_REFRESH_MOD, TECLA_REFRESH_KEY)
+    _ultimo_refresh = agora
+    time.sleep(0.45)
+    return True
+
 def passo_estereo(j, x, y):
     focar(j)
     win32api.SetCursorPos((x, y))
@@ -1489,7 +1516,7 @@ def modo_verificar(hwnd, j):
 # ══════════════════════════════════════════════════════════
 
 def loop(hwnd, j):
-    global rodando
+    global rodando, _ultimo_refresh
 
     print()
     print("=" * 56)
@@ -1510,6 +1537,7 @@ def loop(hwnd, j):
     inicio  = time.time()
     kills   = 0
     sem_mob = 0
+    _ultimo_refresh = inicio
 
     while rodando:
         try:
@@ -1535,6 +1563,8 @@ def loop(hwnd, j):
             if _verificar_stuck():
                 print("  [STUCK] Personagem preso — forcando salto longo...")
                 if log: log.stuck()
+                if REFRESH_APOS_STUCK:
+                    forcar_refresh(j, "stuck")
                 explorar(j, frame, sem_mob=30)   # sem_mob alto = passo gigante
 
             mobs = detectar_mobs(frame, j)
@@ -1585,11 +1615,15 @@ def loop(hwnd, j):
                 elif ciclo_morte is False:
                     _blacklist_add(ax, ay)
                     print(f"  [BL]   Posicao ({ax},{ay}) bloqueada por {BLACKLIST_TEMPO}s")
+                    if REFRESH_APOS_MISS:
+                        forcar_refresh(j, "miss")
                 else:
                     print("  [LOCK] Recalculando alvo no proximo frame; sem blacklist")
 
             else:
                 sem_mob += 1
+                if REFRESH_PERIODICO_S and (time.time() - _ultimo_refresh) > REFRESH_PERIODICO_S:
+                    forcar_refresh(j, "periodico_buscar")
                 if sem_mob % 5 == 0:
                     if log: log.idle(sem_mob)
                     print(f"  [BUSCAR] Explorando ({sem_mob}x sem mob)...")
