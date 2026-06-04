@@ -70,6 +70,8 @@ LOS_MIN_PCT = 0.84
 CAMINHO_ALVO_MAX_ALONGAMENTO = 2.8
 COMBATE_USAR_WAYPOINT = True
 COMBATE_WAYPOINT_CELLS = 10
+ROI_DIREITA_MAX = 0.78
+EXPLORAR_X_MAX = 0.74
 
 # Watchdog de aproximacao: se a distancia nao cai, o alvo provavelmente e
 # inalcançavel por parede/colisao.
@@ -95,7 +97,7 @@ TEMPLATE_ESCALAS = (1.00,)
 # YOLO: detector moderno treinado com imagens do seu jogo.
 USAR_YOLO = True
 YOLO_MODEL_PATH = os.environ.get("RO_YOLO_MODEL", os.path.join("models", "mob_yolo.pt"))
-YOLO_CONF = 0.45
+YOLO_CONF = 0.32
 YOLO_IMGSZ = 640
 # Vazio = aceita todas as classes do modelo. Isso permite trocar entre:
 # - modelo antigo com uma classe: mob
@@ -593,7 +595,7 @@ def _mascara_interface(frame):
     mask[:int(h*0.08), :] = 0
     mask[int(h*0.85):, :] = 0
     mask[:, :int(w*0.04)] = 0
-    mask[:, int(w*0.72):] = 0
+    mask[:, int(w*ROI_DIREITA_MAX):] = 0
     mask[:int(h*0.24), :int(w*0.47)] = 0
     mask[int(h*0.82):, :int(w*0.48)] = 0
     return mask
@@ -604,7 +606,7 @@ def _mascara_roi(frame):
     roi[:int(h*0.08), :]  = 0   # topo completo
     roi[int(h*0.85):, :]  = 0   # chat/barras inferiores
     roi[:, :int(w*0.04)]  = 0   # borda esq
-    roi[:, int(w*0.72):]  = 0   # painel direito: quests + minimap + borda
+    roi[:, int(w*ROI_DIREITA_MAX):]  = 0   # painel direito: quests + minimap + borda
     # Painel esquerdo completo: char info + barras de skill + botao ITEM
     # Cobre ate 20% de altura x 40% de largura (inclui botao ITEM a y~15%, x~37%)
     roi[:int(h*0.24), :int(w*0.47)] = 0
@@ -696,13 +698,20 @@ def detectar_por_yolo(frame, j, com_info=False):
         except Exception:
             continue
 
-        # Ragnarok 2.5D interage melhor na base do sprite; o centro da bbox
-        # costuma cair na cabeca/corpo e distorce range/parede.
         mx = int(j.left + (x1 + x2) / 2)
-        my = int(j.top + y1 + (y2 - y1) * YOLO_TARGET_Y_RATIO)
+        # Ragnarok 2.5D interage melhor na base do sprite; o centro da bbox
+        # costuma cair na cabeca/corpo e distorce range/parede. A validacao
+        # testa alguns pontos para nao perder mob por sombra/HP bar.
+        candidatos_y = [
+            int(j.top + y1 + (y2 - y1) * YOLO_TARGET_Y_RATIO),
+            int(j.top + y1 + (y2 - y1) * 0.64),
+            int(j.top + y1 + (y2 - y1) * 0.84),
+            int(j.top + y1 + (y2 - y1) * 0.52),
+        ]
+        my = candidatos_y[0]
         if _perto_do_mouse(mx, my):
             continue
-        if not _pixel_caminhavel(frame, j, mx, my):
+        if not any(_pixel_caminhavel(frame, j, mx, cy) for cy in candidatos_y):
             continue
         if any((mx - ox) ** 2 + (my - oy) ** 2 < TEMPLATE_NMS_RAIO ** 2
                for ox, oy, _, _ in mobs):
@@ -1374,12 +1383,13 @@ def _planejar_exploracao_visual(j, frame, sem_mob=0):
         grid[start[1], start[0]] = True
 
     tx_min = int(w * 0.08)
-    tx_max = int(w * 0.70)
+    tx_max = int(w * EXPLORAR_X_MAX)
     ty_min = int(h * 0.12)
     ty_max = int(h * 0.82)
     raio_min, raio_max = (300, 620) if sem_mob > 20 else (170, 430)
 
     candidatos = []
+    candidatos_visitados = []
     for ang in np.linspace(0, 2 * np.pi, 32, endpoint=False):
         for raio in (raio_min, (raio_min + raio_max) // 2, raio_max):
             jitter = random.uniform(-0.22, 0.22)
@@ -1391,10 +1401,8 @@ def _planejar_exploracao_visual(j, frame, sem_mob=0):
                 continue
             if walk[y, x] == 0 or dist_wall[y, x] < MAPA_CLEARANCE_MIN:
                 continue
-            if _hist_check(j.left + x, j.top + y):
-                hist_penalty = 160
-            else:
-                hist_penalty = 0
+            visitado = _hist_check(j.left + x, j.top + y)
+            hist_penalty = 420 if visitado else 0
             linha_ok, linha_pct = _linha_caminhavel(walk, cx, cy, x, y)
             gx = min(grid.shape[1] - 1, max(0, x // MAPA_GRID))
             gy = min(grid.shape[0] - 1, max(0, y // MAPA_GRID))
@@ -1408,13 +1416,20 @@ def _planejar_exploracao_visual(j, frame, sem_mob=0):
                 score += 80
             score -= hist_penalty
             score += random.random() * 20
-            candidatos.append((score, x, y, caminho, linha_ok))
+            destino = (score, x, y, caminho, linha_ok)
+            if visitado:
+                candidatos_visitados.append(destino)
+            else:
+                candidatos.append(destino)
 
+    if not candidatos:
+        candidatos = candidatos_visitados
     if not candidatos:
         return None
 
     candidatos.sort(key=lambda item: item[0], reverse=True)
-    _, x, y, caminho, linha_ok = candidatos[0]
+    escolha_top = candidatos[:min(4, len(candidatos))]
+    _, x, y, caminho, linha_ok = random.choice(escolha_top)
     if linha_ok:
         return j.left + x, j.top + y, True
 
@@ -1473,7 +1488,7 @@ def explorar(j, frame=None, sem_mob=0):
 
     # Limites de exploracao (evita painel de quests e bordas)
     tx_min = j.left + int(ww * 0.08)
-    tx_max = j.left + int(ww * 0.70)
+    tx_max = j.left + int(ww * EXPLORAR_X_MAX)
     ty_min = j.top  + int(hh * 0.12)
     ty_max = j.bottom - int(hh * 0.15)
 
@@ -1717,12 +1732,14 @@ def loop(hwnd, j):
                 print(f"  [PESO]  {kills} kills — verifique o peso do inventario!")
 
             # ── Deteccao de stuck ──────────────────────────
-            if _verificar_stuck():
+            if sem_mob >= 8 and _verificar_stuck():
                 print("  [STUCK] Personagem preso — forcando salto longo...")
                 if log: log.stuck()
                 if REFRESH_APOS_STUCK:
                     forcar_refresh(j, "stuck")
+                _hist_explore.clear()
                 explorar(j, frame, sem_mob=30)   # sem_mob alto = passo gigante
+                continue
 
             mobs = detectar_mobs(frame, j)
 
