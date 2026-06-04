@@ -1,5 +1,5 @@
 """
-RO Bot — Template Matching + Rotacao inteligente
+RO Bot â€” Template Matching + Rotacao inteligente
 ==================================================
 Comandos:
   python ro_bot.py --capturar   -> salva sprites (S=salvar varios, Q=sair)
@@ -20,14 +20,15 @@ import pygetwindow as gw
 import win32api, win32con, win32gui, win32ui
 import time, sys, threading, random, os, glob, json, heapq
 from datetime import datetime
+from enum import Enum
 
 if hasattr(sys.stdout, "reconfigure"):
     try: sys.stdout.reconfigure(encoding="utf-8")
     except Exception: pass
 
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  CONFIGURE AQUI
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 JANELA      = "4th | Gepard Shield 3.0 (^-_-^)"
 TECLA_PASSO = "f3"
@@ -55,12 +56,56 @@ ALVO_GRACE_S = 1.8
 ALVO_RECHECK_S = 0.15
 ALVO_REAQUIRE_RAIO = 190
 ALVO_APROX_FATOR = 0.28
+ALVO_LOCK_S = 4.0  # segundos maximos travando no mesmo alvo sem redeteccao visual
+
+# Switch oportunista: se mob detectado e < ALVO_SWITCH_RATIO vezes a distancia do alvo atual,
+# troca de alvo imediatamente. Evita bot perseguir mob longe ignorando um ao lado.
+ALVO_SWITCH_RATIO = 0.65   # troca se novo mob < 65% da dist do alvo atual (35% mais perto)
+ALVO_SWITCH_MIN_DIST = 60  # px minimos de diferenca para valer a troca (evita micro-trocas)
+
+# Grace period de redeteccao escalavel com distancia:
+# grace = ALVO_GRACE_BASE + dist_px/100 * ALVO_GRACE_POR_100PX
+# Exemplo: mob a 514px â†’ 1.8 + (514/100 Ã— 0.6) = ~5s de tentativas
+ALVO_GRACE_BASE      = 1.8   # segundos base (para mobs perto)
+ALVO_GRACE_POR_100PX = 0.60  # segundos extras por 100px de distancia
+
+# â”€â”€ Maquina de estados â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+HP_RECUPERAR_MIN  = 0.40   # transiciona para RECUPERAR quando HP cai abaixo disto
+SP_RECUPERAR_MIN  = 0.18   # transiciona para RECUPERAR quando SP cai abaixo disto
+
+# â”€â”€ YOLO Tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+USAR_YOLO_TRACKING = True  # usa model.track() â€” da ID persistente ao mob entre frames
+
+# â”€â”€ Deteccao de HP bar do mob â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+HP_BAR_MOB_ATIVO    = True  # detecta barra de HP colorida acima do sprite do mob
+HP_BAR_MOB_Y_BUSCA  = 58    # pixels acima do centro do mob para buscar a barra
+HP_BAR_MOB_PIX_MIN  = 14    # min pixels coloridos em uma linha para confirmar barra
+
+# â”€â”€ Mapa caminhavel estabilizado (media de frames) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+WALK_HIST_N = 3   # frames para media do mapa caminhavel (menor = adapta mais rapido a efeitos de skill)
+
+# â”€â”€ Log visual (screenshots anotados + video MP4) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+VISUAL_LOG_ATIVO    = os.environ.get("RO_VISUAL_LOG", "0").lower() in ("1", "true", "yes", "on")
+VISUAL_LOG_PASTA    = "visual_log"
+VISUAL_LOG_VIDEO    = os.environ.get("RO_VISUAL_LOG_VIDEO", "1").lower() in ("1", "true", "yes", "on")
+VISUAL_LOG_FPS      = 4      # FPS do video gerado (4 = 1 frame a cada 250ms)
+# Eventos que disparam screenshot (remova os que nao quiser)
+VISUAL_LOG_EVENTOS  = {"MOB", "MOVE", "SKILL", "KILL", "PATH", "STUCK",
+                        "BLIND_ATTACK", "LOOT"}
+
+# â”€â”€ Scan assincrono (thread dedicada de deteccao) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Thread separada roda YOLO a SCAN_IMGSZ continuamente e deposita resultados
+# em _scan_result. Main loop consome sem esperar inferencia â€” reacao em ~50ms.
+SCAN_ASYNC_ATIVO = os.environ.get("RO_SCAN_ASYNC", "0").lower() in ("1", "true", "yes", "on")
+SCAN_IMGSZ       = 320    # resolucao reduzida (~4x mais rapido que 640)
+SCAN_CONF        = 0.38   # confianÃ§a um pouco maior para compensar baixa res
+SCAN_INTERVALO   = 0.028  # ~35fps de scan (ms por ciclo do worker)
 
 # Sincronia de combate 2.5D: nao dispare skill enquanto ainda esta fora
 # de alcance ou no meio da animacao de movimento.
 COMBATE_RANGE_PX = 235
 COMBATE_APROX_FATOR = 0.72
-COMBATE_MOVE_SETTLE_S = 0.22
+COMBATE_MOVE_SETTLE_S = 0.65  # tempo para o personagem andar ~65px antes de re-avaliar range
 SKILL_CLICAR_ALVO = True
 SKILL_CLICK_DELAY_S = 0.06
 SKILL_POS_CAST_S = 0.35
@@ -76,9 +121,9 @@ ROI_DIREITA_MAX = 0.78
 EXPLORAR_X_MAX = 0.74
 
 # Watchdog de aproximacao: se a distancia nao cai, o alvo provavelmente e
-# inalcançavel por parede/colisao.
+# inalcanÃ§avel por parede/colisao.
 APROX_WATCH_ATIVO = True
-APROX_WATCH_TENTATIVAS = 6
+APROX_WATCH_TENTATIVAS = 5
 APROX_WATCH_MIN_DELTA = 20
 APROX_WATCH_RAIO = 160
 
@@ -126,10 +171,10 @@ MOV_AREA_MIN = 45
 MOV_AREA_MAX = 2200
 MOV_DIFF_MIN = 18
 
-# ── Auto-pocao ────────────────────────────────────────────
+# â”€â”€ Auto-pocao â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Ajuste as teclas conforme sua hotkey no jogo (barra de consumiveis)
-TECLA_POT_HP  = "insert"   # pocao de HP — mude para sua tecla
-TECLA_POT_SP  = "home"     # pocao de SP — mude para sua tecla
+TECLA_POT_HP  = "insert"   # pocao de HP â€” mude para sua tecla
+TECLA_POT_SP  = "home"     # pocao de SP â€” mude para sua tecla
 HP_MINIMO     = 0.60       # usa pocao HP quando abaixo de 60%
 SP_MINIMO     = 0.35       # usa pocao SP quando abaixo de 35%
 INTERVALO_POT = 2.5        # segundos minimos entre pots (anti-spam)
@@ -144,9 +189,9 @@ SP_BAR_Y  = 0.080
 SP_BAR_X0 = 0.045
 SP_BAR_X1 = 0.150
 
-# ── Peso / stuck ──────────────────────────────────────────
+# â”€â”€ Peso / stuck â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 KILLS_AVISO_PESO = 200    # avisa sobre peso a cada N kills
-STUCK_SPREAD_MIN = 280    # px — variacao minima em 8 exploracoes (abaixo = stuck)
+STUCK_SPREAD_MIN = 280    # px â€” variacao minima em 8 exploracoes (abaixo = stuck)
 
 # Navegacao visual: monta uma mascara local de chao caminhavel e escolhe
 # waypoints por A* em vez de clicar em direcoes aleatorias.
@@ -157,24 +202,33 @@ MAPA_GRID = 16
 MAPA_WAYPOINT_CURTO = 10
 MAPA_WAYPOINT_LONGO = 16
 
-# ── Anti-jail ─────────────────────────────────────────────
+# â”€â”€ Anti-jail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 ANTIJAIL_ATIVO       = True
-# Cores de texto GM no chat (BGR) — so coloque cores EXCLUSIVAS de GM
+# Cores de texto GM no chat (BGR) â€” so coloque cores EXCLUSIVAS de GM
 # NAO inclua cores de mensagens automaticas do servidor (ciano, laranja, vermelho)
 # Para descobrir a cor real do GM: peca a um amigo GM para te whispar e
 # use --verificar para observar o chat naquele momento.
 ANTIJAIL_CORES_GM    = [
-    (200,  20, 200),   # roxo/magenta — whisper de GM (mais comum em RO)
-    ( 20,  20, 255),   # azul vivo    — alguns servidores usam para GMs
+    (200,  20, 200),   # roxo/magenta â€” whisper de GM (mais comum em RO)
+    ( 20,  20, 255),   # azul vivo    â€” alguns servidores usam para GMs
 ]
 ANTIJAIL_TOL_COR     = 40     # tolerancia de cor (0-255)
-ANTIJAIL_PIX_MIN     = 20     # pixels minimos para confirmar (mais alto = menos falso positivo)
-ANTIJAIL_FRAMES_MIN  = 4      # frames consecutivos necessarios para disparar o alarme
+ANTIJAIL_PIX_MIN     = 60     # pixels minimos para confirmar (mais alto = menos falso positivo)
+ANTIJAIL_FRAMES_MIN  = 8      # frames consecutivos necessarios para disparar o alarme
 ANTIJAIL_MAPA_DIFF   = 55.0   # diferenca media de pixel para detectar teletransporte
 ANTIJAIL_CHAT_Y0     = 0.855  # inicio da area de chat (% da altura)
 ANTIJAIL_CHAT_Y1     = 0.960  # fim da area de chat
 
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+class Estado(Enum):
+    """Estados da maquina de combate."""
+    BUSCAR    = "BUSCAR"
+    APROXIMAR = "APROXIMAR"
+    ATACAR    = "ATACAR"
+    LOOT      = "LOOT"
+    RECUPERAR = "RECUPERAR"
+
 
 class Logger:
     """Registra todos os eventos em JSON-lines para analise com ro_viewer.py"""
@@ -242,7 +296,7 @@ class Logger:
         self._w("FIM", {"kills": kills, "t": round(t_s), "max_c": MAX_CICLOS_ATAQUE})
         self._f.close()
 
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 rodando         = True
 templates       = []
@@ -250,8 +304,8 @@ template_masks  = []
 yolo_model      = None
 _yolo_avisou    = False
 log             = None
-_blacklist      = []   # [(x, y, t)] — posicoes MISS recentes, ignoradas na deteccao
-_hist_explore        = []   # [(x, y, t)] — historico de exploracao para evitar circulos
+_blacklist      = []   # [(x, y, t)] â€” posicoes MISS recentes, ignoradas na deteccao
+_hist_explore        = []   # [(x, y, t)] â€” historico de exploracao para evitar circulos
 _ultimo_pot          = {"hp": 0.0, "sp": 0.0}
 _ultimo_refresh      = 0.0
 _mapa_fp_ref         = None  # fingerprint do mapa de referencia para detectar jail
@@ -265,11 +319,20 @@ _aprox_watch         = {"x": None, "y": None, "dist": None, "fails": 0}
 _aprox_bloqueado     = False
 _explore_until       = 0.0
 _explore_dest        = None
+_alvo_lock           = None  # (ax, ay) do alvo travado na sessao de combate atual
+_alvo_lock_t         = 0.0   # timestamp de quando o lock foi criado
+_track_ids           = {}    # (mx, my) -> track_id da ultima deteccao YOLO
+_walk_hist           = []    # ultimos WALK_HIST_N frames do mapa caminhavel
 
-HIST_RAIO  = 120   # px — raio de exclusao do historico de exploracao
+# Scan assincrono
+import queue as _queue_mod
+_scan_queue  = _queue_mod.Queue(maxsize=2)   # frame+mobs pre-calculados pelo worker
+_scan_model  = None                          # instancia YOLO separada para o worker
+
+HIST_RAIO  = 120   # px â€” raio de exclusao do historico de exploracao
 HIST_TEMPO = 90    # segundos
 
-# ── HP / SP / recursos ────────────────────────────────────
+# â”€â”€ HP / SP / recursos â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _ler_barra(frame, y_pct, x0_pct, x1_pct):
     """Retorna nivel 0.0-1.0 da barra contando pixels brilhantes (preenchidos)."""
@@ -287,8 +350,8 @@ def verificar_hp_sp(frame, j):
     """
     Le HP e SP do frame capturado. Usa pocoes se necessario.
     Retorna (morto, tomou_dano):
-      morto     — True se HP < 2%
-      tomou_dano — True se HP caiu > 1.5% desde o ultimo frame
+      morto     â€” True se HP < 2%
+      tomou_dano â€” True se HP caiu > 1.5% desde o ultimo frame
     """
     global _ultimo_pot, _hp_ultimo
     hp = _ler_barra(frame, HP_BAR_Y, HP_BAR_X0, HP_BAR_X1)
@@ -299,7 +362,7 @@ def verificar_hp_sp(frame, j):
     _hp_ultimo = hp
 
     if hp < 0.02:
-        print("  [MORTE] HP zerado — encerrando bot")
+        print("  [MORTE] HP zerado â€” encerrando bot")
         if log: log.morte()
         return True, True
 
@@ -307,14 +370,14 @@ def verificar_hp_sp(frame, j):
         focar(j)
         pyautogui.press(TECLA_POT_HP)
         _ultimo_pot["hp"] = agora
-        print(f"  [POT HP]  {hp:.0%} — pocao usada")
+        print(f"  [POT HP]  {hp:.0%} â€” pocao usada")
         if log: log.pot("hp", hp)
 
     if sp < SP_MINIMO and (agora - _ultimo_pot["sp"]) > INTERVALO_POT:
         focar(j)
         pyautogui.press(TECLA_POT_SP)
         _ultimo_pot["sp"] = agora
-        print(f"  [POT SP]  {sp:.0%} — pocao usada")
+        print(f"  [POT SP]  {sp:.0%} â€” pocao usada")
         if log: log.pot("sp", sp)
 
     return False, tomou_dano
@@ -329,12 +392,12 @@ def _verificar_stuck():
     spread = (max(xs) - min(xs)) + (max(ys) - min(ys))
     return spread < STUCK_SPREAD_MIN
 
-# ── Anti-jail ─────────────────────────────────────────────
+# â”€â”€ Anti-jail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _fingerprint_mapa(frame):
     """
     Amostra 9 pontos do fundo do mapa ao redor do personagem.
-    Retorna vetor BGR medio para comparacao — muda drasticamente em jail.
+    Retorna vetor BGR medio para comparacao â€” muda drasticamente em jail.
     """
     h, w = frame.shape[:2]
     cx, cy = w // 2, h // 2
@@ -416,7 +479,7 @@ def antijail_alertar(j, motivo):
     print()
     print("!" * 56)
     print(f"  [ANTIJAIL] {msg}")
-    print("  Bot pausado — verifique o jogo imediatamente!")
+    print("  Bot pausado â€” verifique o jogo imediatamente!")
     print("!" * 56)
     print()
 
@@ -438,13 +501,13 @@ def antijail_alertar(j, motivo):
         ctypes.windll.user32.MessageBoxW(
             0,
             f"[ANTIJAIL] {msg}\n\nVerifique o chat e o personagem!\nClique OK para fechar o bot.",
-            "RO BOT — ALERTA",
+            "RO BOT â€” ALERTA",
             0x30 | 0x1000   # MB_ICONWARNING | MB_SYSTEMMODAL
         )
     except Exception:
         pass
 
-# ── janela ────────────────────────────────────────────────
+# â”€â”€ janela â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def pegar_janela():
     lst = gw.getWindowsWithTitle(JANELA)
@@ -467,7 +530,7 @@ def focar(j):
     except Exception:
         pass
 
-# ── captura via PrintWindow ───────────────────────────────
+# â”€â”€ captura via PrintWindow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def capturar_cv(hwnd, j):
     w, h = j.width, j.height
@@ -485,7 +548,7 @@ def capturar_cv(hwnd, j):
     img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
     return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
-# ── templates ─────────────────────────────────────────────
+# â”€â”€ templates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 template_nomes = []   # nome de cada template carregado (para debug no --verificar)
 
@@ -555,7 +618,7 @@ def carregar_templates():
     if not USAR_CONTRASTE:
         print(f"  [AVISO] Sem templates. Rode: python ro_bot.py --capturar")
         return False
-    print(f"  [OK] Sem templates — usando contraste (fundo preto)")
+    print(f"  [OK] Sem templates â€” usando contraste (fundo preto)")
     return True
 
 def proximo_nome_template():
@@ -591,7 +654,7 @@ def carregar_yolo(silencioso=False):
             _yolo_avisou = True
         return False
 
-# ── deteccao ──────────────────────────────────────────────
+# â”€â”€ deteccao â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _mascara_interface(frame):
     h, w = frame.shape[:2]
@@ -616,11 +679,14 @@ def _mascara_roi(frame):
     roi[:int(h*0.24), :int(w*0.47)] = 0
     roi[int(h*0.82):, :int(w*0.48)] = 0  # chat/battle log inferior esquerdo
 
-    # Mascara apenas o sprite do personagem (minimal — sem efeitos visuais)
+    # Mascara apenas o sprite do personagem (minimal â€” sem efeitos visuais)
     cx, cy = w // 2, h // 2
-    mx = int(w * 0.07)
-    y0 = max(0, cy - int(h * 0.14))
-    y1 = min(h, cy + int(h * 0.11))
+    # Mascara minima: cobre apenas o sprite imediato do personagem.
+    # Antes era 7%/14%/11% (271Ã—258px) â€” mobs a 200px ficavam invisiveis.
+    # Agora 4%/8%/6% (155Ã—144px) â€” YOLO detecta mobs bem mais perto.
+    mx = int(w * 0.04)
+    y0 = max(0, cy - int(h * 0.08))
+    y1 = min(h, cy + int(h * 0.06))
     roi[y0:y1, cx-mx : cx+mx] = 0
 
     return roi
@@ -668,12 +734,21 @@ def detectar_por_yolo(frame, j, com_info=False):
 
     roi = _mascara_roi(frame)
     try:
-        results = yolo_model.predict(
-            source=roi,
-            conf=YOLO_CONF,
-            imgsz=YOLO_IMGSZ,
-            verbose=False
-        )
+        if USAR_YOLO_TRACKING:
+            results = yolo_model.track(
+                source=roi,
+                conf=YOLO_CONF,
+                imgsz=YOLO_IMGSZ,
+                persist=True,
+                verbose=False,
+            )
+        else:
+            results = yolo_model.predict(
+                source=roi,
+                conf=YOLO_CONF,
+                imgsz=YOLO_IMGSZ,
+                verbose=False,
+            )
     except Exception as e:
         print(f"  [YOLO] Erro na inferencia: {e}")
         return []
@@ -699,6 +774,9 @@ def detectar_por_yolo(frame, j, com_info=False):
             if YOLO_CLASSES_MOB and label not in YOLO_CLASSES_MOB and cls_id != 0:
                 continue
             x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
+            track_id = (int(box.id[0].item())
+                        if (USAR_YOLO_TRACKING and box.id is not None)
+                        else None)
         except Exception:
             continue
 
@@ -721,6 +799,7 @@ def detectar_por_yolo(frame, j, com_info=False):
                for ox, oy, _, _ in mobs):
             continue
         mobs.append((mx, my, f"YOLO:{label}", conf))
+        _track_ids[(mx, my)] = track_id   # grava ID para lookup no state-machine
 
     mobs.sort(key=lambda p: (p[0]-cx_c)**2 + (p[1]-cy_c)**2)
     if com_info:
@@ -781,8 +860,8 @@ def detectar_por_template(frame, j, com_info=False):
         return mobs
     return [(mx, my) for mx, my, _, _ in mobs]
 
-BLACKLIST_RAIO  = 90   # pixels — raio de exclusao ao redor de um MISS
-BLACKLIST_TEMPO = 45   # segundos — quanto tempo ignorar a posicao
+BLACKLIST_RAIO  = 90   # pixels â€” raio de exclusao ao redor de um MISS
+BLACKLIST_TEMPO = 45   # segundos â€” quanto tempo ignorar a posicao
 
 def detectar_por_sprite(frame, j, com_info=False):
     """
@@ -959,6 +1038,22 @@ def _mob_perto(mobs, ax, ay, raio=ALVO_REAQUIRE_RAIO):
     candidatos.sort(key=lambda item: item[0])
     return candidatos[0][1], candidatos[0][2]
 
+def _rastrear_alvo(mobs, ax, ay, track_id=None):
+    """
+    Localiza o alvo entre os mobs detectados.
+    Prioridade 1: track_id YOLO (ID persistente entre frames).
+    Prioridade 2: proximidade geometrica via _mob_perto.
+    Retorna (mx, my) ou None.
+    """
+    if not mobs:
+        return None
+    if track_id is not None:
+        for mx, my in mobs:
+            if _track_ids.get((mx, my)) == track_id:
+                return (mx, my)
+    return _mob_perto(mobs, ax, ay)
+
+
 def aguardar_reaquisicao(hwnd, j, ax, ay, timeout=ALVO_GRACE_S):
     fim = time.time() + timeout
     ultimo = None
@@ -1019,7 +1114,7 @@ def aproximar_ate_range(hwnd, j, ax, ay):
     if _aprox_watch_update(ax, ay, dist):
         _blacklist_add(ax, ay)
         _aprox_bloqueado = True
-        print(f"  [PATH] Alvo inalcançavel ({dist:.0f}px sem progresso); blacklist temporaria")
+        print(f"  [PATH] Alvo inalcanÃ§avel ({dist:.0f}px sem progresso); blacklist temporaria")
         _aprox_watch_reset()
         return ax, ay, False
 
@@ -1045,7 +1140,7 @@ def aproximar_ate_range(hwnd, j, ax, ay):
     time.sleep(COMBATE_MOVE_SETTLE_S)
     return ax, ay, False
 
-# ── click e acoes ─────────────────────────────────────────
+# â”€â”€ click e acoes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def mouse_click(x, y):
     win32api.SetCursorPos((x, y))
@@ -1118,14 +1213,14 @@ def lotar_area(j, ax, ay):
 def combater(hwnd, j, ax, ay):
     """
     Rotacao de ataque apos teleporte de 60% do caminho.
-    O mob fica a ~40% da distancia original — fora da mascara central, detectavel.
+    O mob fica a ~40% da distancia original â€” fora da mascara central, detectavel.
     Retorna o ciclo em que o mob morreu (truthy) ou False.
     """
     # Pre-check: apos teleporte parcial o mob deve estar visivel
     frame_pre = capturar_cv(hwnd, j)
     mobs_pre  = len(detectar_mobs(frame_pre, j))
     if mobs_pre == 0:
-        print("  [SKIP] Nenhum mob visivel apos mover — ignorando")
+        print("  [SKIP] Nenhum mob visivel apos mover â€” ignorando")
         if log: log.skip(ax, ay)
         return False
 
@@ -1140,7 +1235,7 @@ def combater(hwnd, j, ax, ay):
             print(f"  [KILL] Mob morreu no ciclo {ciclo}")
             return ciclo
 
-    print(f"  [MISS] Mob sobreviveu {MAX_CICLOS_ATAQUE} ciclos — pulando")
+    print(f"  [MISS] Mob sobreviveu {MAX_CICLOS_ATAQUE} ciclos â€” pulando")
     if log: log.miss(ax, ay)
     return False
 
@@ -1380,7 +1475,8 @@ def _waypoint_para_alvo(frame, j, tx, ty, dist):
 def _planejar_exploracao_visual(j, frame, sem_mob=0):
     h, w = frame.shape[:2]
     cx, cy = w // 2, h // 2
-    walk = _mapa_caminhavel(frame, incluir_personagem=True)
+    # Usa mapa estabilizado (media de frames) para ignorar efeitos visuais temporarios
+    walk = _mapa_caminhavel_estavel(frame, incluir_personagem=True)
     dist_wall = _distancia_parede(walk)
     grid = _criar_grid_caminhavel(walk)
     start = (min(grid.shape[1] - 1, max(0, cx // MAPA_GRID)),
@@ -1468,6 +1564,60 @@ def _pixel_caminhavel(frame, j, tx, ty, limiar=22):
     pct = float(np.mean(patch > 0))
     return pct > 0.55  # exige pelo menos 55% de area caminhavel ao redor
 
+def detectar_hp_bar_mob(frame, j, mx, my):
+    """
+    Busca a barra de HP colorida acima do sprite do mob.
+    Retorna float 0.0-1.0 (proporcao verde = HP restante) ou None se nao achou.
+    Util para priorizar alvos com pouco HP e confirmar se mob esta vivo.
+    """
+    if not HP_BAR_MOB_ATIVO:
+        return None
+    rx, ry = mx - j.left, my - j.top
+    h, w = frame.shape[:2]
+    y0 = max(0, ry - HP_BAR_MOB_Y_BUSCA)
+    y1 = max(0, ry - 8)
+    x0 = max(0, rx - 50)
+    x1 = min(w, rx + 50)
+    if y0 >= y1 or x0 >= x1:
+        return None
+    roi_hp = frame[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(roi_hp, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    # Pixels que sao cor de barra de HP: verde/amarelo ou vermelho, alta saturacao
+    barra = (sat > 100) & (val > 80) & (
+        ((hue >= 35) & (hue <= 85)) |   # verde / amarelo-verde
+        (hue <= 12) | (hue >= 160)       # vermelho
+    )
+    for row in range(barra.shape[0]):
+        pix = int(np.sum(barra[row]))
+        if pix >= HP_BAR_MOB_PIX_MIN:
+            linha_hue = hue[row][barra[row]]
+            if len(linha_hue) == 0:
+                continue
+            verdes = int(np.sum((linha_hue >= 35) & (linha_hue <= 85)))
+            return float(verdes) / len(linha_hue)
+    return None
+
+
+def _mapa_caminhavel_estavel(frame, incluir_personagem=True):
+    """
+    Media dos ultimos WALK_HIST_N frames do mapa caminhavel.
+    Reduz ruido de animacoes de skill/mob que pintam pixels no chao
+    e causam falsos 'bloqueado' no planejamento de rota.
+    """
+    global _walk_hist
+    atual = _mapa_caminhavel(frame, incluir_personagem)
+    _walk_hist.append(atual.astype(np.float32))
+    if len(_walk_hist) > WALK_HIST_N:
+        _walk_hist.pop(0)
+    if len(_walk_hist) < 3:
+        return atual
+    media = np.mean(np.stack(_walk_hist, axis=0), axis=0)
+    return (media > 127).astype(np.uint8) * 255
+
+
 def _hist_add(x, y):
     _hist_explore.append((x, y, time.time()))
 
@@ -1477,6 +1627,276 @@ def _hist_check(x, y):
                         if agora - ht < HIST_TEMPO]
     return any(abs(x - hx) < HIST_RAIO and abs(y - hy) < HIST_RAIO
                for hx, hy, ht in _hist_explore)
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#  LOG VISUAL â€” screenshots anotados + compilacao em video
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+_vlog_pasta   = None   # pasta da sessao atual (criada em vlog_iniciar)
+_vlog_seq     = 0      # numero sequencial do proximo frame
+_vlog_frames  = []     # lista de caminhos para compilar video no fim
+_vlog_t0      = 0.0    # timestamp de inicio da sessao
+
+# Cores por tipo de evento (BGR)
+_VLOG_CORES = {
+    "MOB":          (0,   200, 255),  # amarelo
+    "MOVE":         (255, 180,   0),  # azul
+    "SKILL":        (0,   255, 100),  # verde
+    "KILL":         (0,   255,   0),  # verde vivo
+    "LOOT":         (100, 255, 180),  # verde claro
+    "PATH":         (0,    60, 255),  # vermelho
+    "STUCK":        (0,    60, 255),  # vermelho
+    "BLIND_ATTACK": (0,   140, 255),  # laranja
+    "EXPLORE":      (180, 180, 180),  # cinza
+    "DEFAULT":      (200, 200, 200),
+}
+
+
+def vlog_iniciar(ts_sessao):
+    """Cria a pasta da sessao e inicializa o modulo de log visual."""
+    global _vlog_pasta, _vlog_seq, _vlog_frames, _vlog_t0
+    if not VISUAL_LOG_ATIVO:
+        return
+    _vlog_pasta  = os.path.join(VISUAL_LOG_PASTA, ts_sessao)
+    _vlog_seq    = 0
+    _vlog_frames = []
+    _vlog_t0     = time.time()
+    os.makedirs(_vlog_pasta, exist_ok=True)
+    print(f"  [VLOG] Pasta: {_vlog_pasta}")
+
+
+def vlog_frame(frame, j, evento, info=None,
+               mob_x=None, mob_y=None, estado_nome="",
+               waypoint_xy=None, outros_mobs=None):
+    """
+    Salva um screenshot anotado.
+    frame    : imagem BGR capturada do jogo
+    evento   : string do tipo de evento ("MOB", "KILL", etc.)
+    info     : texto extra para mostrar (distancia, ciclo, etc.)
+    mob_x/y  : coordenadas absolutas do alvo (desenha marcador)
+    estado_nome: nome do estado atual da maquina
+    """
+    global _vlog_seq
+    if not VISUAL_LOG_ATIVO or _vlog_pasta is None:
+        return
+    if evento not in VISUAL_LOG_EVENTOS:
+        return
+
+    vis  = frame.copy()
+    cor  = _VLOG_CORES.get(evento, _VLOG_CORES["DEFAULT"])
+    h, w = vis.shape[:2]
+    t_rel = round(time.time() - _vlog_t0, 2)
+
+    # --- Marcador no alvo ---
+    if mob_x is not None and mob_y is not None:
+        rx = int(mob_x - j.left)
+        ry = int(mob_y - j.top)
+        if 0 <= rx < w and 0 <= ry < h:
+            cv2.circle(vis, (rx, ry), 28, cor, 3)
+            cv2.circle(vis, (rx, ry),  5, cor, -1)
+            cv2.line(vis, (rx - 35, ry), (rx + 35, ry), cor, 1)
+            cv2.line(vis, (rx, ry - 35), (rx, ry + 35), cor, 1)
+
+    # --- Personagem no centro ---
+    cx, cy = w // 2, h // 2
+    cv2.circle(vis, (cx, cy), 12, (255, 255, 255), 2)
+
+    # --- Linha personagem -> alvo ---
+    if mob_x is not None and mob_y is not None:
+        rx = int(mob_x - j.left)
+        ry = int(mob_y - j.top)
+        if 0 <= rx < w and 0 <= ry < h:
+            cv2.line(vis, (cx, cy), (rx, ry), cor, 1, cv2.LINE_AA)
+
+    # --- Waypoint (onde o bot clica para caminhar) ---
+    if waypoint_xy is not None:
+        wx = int(waypoint_xy[0] - j.left)
+        wy = int(waypoint_xy[1] - j.top)
+        if 0 <= wx < w and 0 <= wy < h:
+            cv2.drawMarker(vis, (wx, wy), (0, 255, 255),
+                           cv2.MARKER_DIAMOND, 18, 2)
+            cv2.line(vis, (wx-10, wy), (wx+10, wy), (0,255,255), 1)
+            cv2.line(vis, (wx, wy-10), (wx, wy+10), (0,255,255), 1)
+
+    # --- Mobs ignorados (cinza) ---
+    if outros_mobs:
+        for omx, omy in outros_mobs[:6]:  # maximo 6
+            orx = int(omx - j.left)
+            ory = int(omy - j.top)
+            if 0 <= orx < w and 0 <= ory < h:
+                cv2.circle(vis, (orx, ory), 14, (120, 120, 120), 1)
+
+    # --- HUD de informacoes ---
+    linhas = [
+        f"t={t_rel:.2f}s   [{evento}]",
+        f"Estado: {estado_nome}",
+    ]
+    if mob_x is not None:
+        dist = ((mob_x - (j.left + w//2))**2 + (mob_y - (j.top + h//2))**2)**0.5
+        linhas.append(f"Alvo: ({int(mob_x)},{int(mob_y)})  dist={dist:.0f}px")
+    if info:
+        linhas.append(str(info))
+
+    # Fundo semi-transparente para o HUD
+    overlay = vis.copy()
+    hud_h   = len(linhas) * 22 + 14
+    cv2.rectangle(overlay, (6, 6), (440, 6 + hud_h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.55, vis, 0.45, 0, vis)
+
+    # Texto
+    for i, linha in enumerate(linhas):
+        y_txt = 26 + i * 22
+        cv2.putText(vis, linha, (12, y_txt),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, cor, 1, cv2.LINE_AA)
+
+    # Borda colorida fina ao redor da imagem
+    cv2.rectangle(vis, (0, 0), (w - 1, h - 1), cor, 3)
+
+    # --- Salvar ---
+    nome = os.path.join(_vlog_pasta,
+                        f"{_vlog_seq:05d}_{evento}.jpg")
+    cv2.imwrite(nome, vis, [cv2.IMWRITE_JPEG_QUALITY, 82])
+    _vlog_frames.append(nome)
+    _vlog_seq += 1
+
+
+def vlog_finalizar():
+    """
+    Chamado no fim da sessao.
+    Compila todos os screenshots em um video MP4 se VISUAL_LOG_VIDEO=True.
+    """
+    if not VISUAL_LOG_ATIVO or not _vlog_frames:
+        return
+    print(f"  [VLOG] {len(_vlog_frames)} frames salvos em {_vlog_pasta}")
+    if not VISUAL_LOG_VIDEO:
+        return
+    try:
+        amostra = cv2.imread(_vlog_frames[0])
+        if amostra is None:
+            return
+        h, w = amostra.shape[:2]
+        ts   = os.path.basename(_vlog_pasta)
+        arq  = os.path.join(VISUAL_LOG_PASTA, f"ro_video_{ts}.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(arq, fourcc, VISUAL_LOG_FPS, (w, h))
+        for caminho in _vlog_frames:
+            img = cv2.imread(caminho)
+            if img is not None:
+                writer.write(img)
+        writer.release()
+        print(f"  [VLOG] Video salvo: {arq}")
+    except Exception as e:
+        print(f"  [VLOG] Erro ao gerar video: {e}")
+
+
+def _scan_extrair_mobs(results, frame, j):
+    """Extrai posicoes (mx, my) dos resultados YOLO para o worker de scan."""
+    if not results:
+        return []
+    result = results[0]
+    names  = getattr(result, "names", {}) or {}
+    boxes  = getattr(result, "boxes", None)
+    if boxes is None:
+        return []
+    mobs   = []
+    cx_c   = (j.left + j.right) // 2
+    cy_c   = (j.top  + j.bottom) // 2
+    for box in boxes:
+        try:
+            cls_id = int(box.cls[0].item())
+            label  = str(names.get(cls_id, cls_id)).lower()
+            if YOLO_CLASSES_MOB and label not in YOLO_CLASSES_MOB and cls_id != 0:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
+        except Exception:
+            continue
+        mx = int(j.left + (x1 + x2) / 2)
+        my = int(j.top  + y1 + (y2 - y1) * YOLO_TARGET_Y_RATIO)
+        if _blacklist_check(mx, my):
+            continue
+        if _perto_do_mouse(mx, my):
+            continue
+        if not _pixel_caminhavel(frame, j, mx, my):
+            continue
+        if LOS_MOB_ATIVO and not alvo_com_los(frame, j, mx, my):
+            continue
+        if any((mx-ox)**2+(my-oy)**2 < TEMPLATE_NMS_RAIO**2 for ox, oy in mobs):
+            continue
+        mobs.append((mx, my))
+    mobs.sort(key=lambda p: (p[0]-cx_c)**2 + (p[1]-cy_c)**2)
+    return mobs
+
+
+def _scan_worker(hwnd, j):
+    """
+    Thread dedicada de deteccao rapida.
+    Roda YOLO a SCAN_IMGSZ em loop; deposita (frame, mobs) na _scan_queue.
+    Main loop consome quando disponivel â€” sem esperar inferencia.
+    """
+    global _scan_model
+    if not SCAN_ASYNC_ATIVO or not USAR_YOLO:
+        return
+    try:
+        from ultralytics import YOLO as _YOLO
+        _scan_model = _YOLO(YOLO_MODEL_PATH)
+    except Exception as e:
+        print(f"  [SCAN] Falha ao carregar modelo de scan: {e}")
+        return
+    print(f"  [SCAN] Worker iniciado ({SCAN_IMGSZ}px ~{1/SCAN_INTERVALO:.0f}fps)")
+    while rodando:
+        try:
+            frame   = capturar_cv(hwnd, j)
+            roi     = _mascara_roi(frame)
+            results = _scan_model.predict(
+                source=roi, conf=SCAN_CONF,
+                imgsz=SCAN_IMGSZ, verbose=False,
+            )
+            mobs = _scan_extrair_mobs(results, frame, j)
+            # Descarta resultado antigo se fila cheia, mantÃ©m sempre o mais fresco
+            if _scan_queue.full():
+                try: _scan_queue.get_nowait()
+                except Exception: pass
+            _scan_queue.put_nowait((frame, mobs))
+        except Exception:
+            pass
+        time.sleep(SCAN_INTERVALO)
+
+
+def scan_pegar():
+    """
+    Retorna (frame, mobs) do ultimo scan assincrono, ou None se indisponivel.
+    Chamada nao-bloqueante â€” nao atrasa o loop principal.
+    """
+    try:
+        return _scan_queue.get_nowait()
+    except Exception:
+        return None
+
+
+def _esperar_mob_range(hwnd, j, duracao_s, ax_ref, ay_ref, tid_ref=None):
+    """
+    Substitui time.sleep() passivo por polling ativo a cada 100ms.
+    Se o alvo entrar em COMBATE_RANGE_PX durante a espera, retorna True
+    imediatamente â€” o personagem pode entrar em ATACAR sem esperar o fim
+    do settle completo.
+    """
+    fim = time.time() + duracao_s
+    while time.time() < fim and rodando:
+        time.sleep(min(0.10, max(0.01, fim - time.time())))
+        # Tenta usar scan assincrono primeiro (zero custo de inferencia)
+        scan = scan_pegar()
+        if scan:
+            frame_tmp, mobs_tmp = scan
+        else:
+            frame_tmp = capturar_cv(hwnd, j)
+            mobs_tmp  = detectar_mobs(frame_tmp, j)
+        novo = _rastrear_alvo(mobs_tmp, ax_ref, ay_ref, tid_ref)
+        if novo:
+            dist = distancia_do_personagem(j, novo[0], novo[1])
+            if dist <= COMBATE_RANGE_PX:
+                return True
+    return False
+
 
 def explorar(j, frame=None, sem_mob=0):
     cx = (j.left + j.right)  // 2
@@ -1506,7 +1926,7 @@ def explorar(j, frame=None, sem_mob=0):
         dx_range = (200, 400)
         dy_range = (100, 220)
 
-    # Tenta ate 12 direcoes — prioriza pixel caminhavel e posicao nao visitada
+    # Tenta ate 12 direcoes â€” prioriza pixel caminhavel e posicao nao visitada
     tx, ty, ok = cx, cy, False
     for tentativa in range(12):
         dx = random.choice([-1, 1]) * random.randint(*dx_range)
@@ -1524,9 +1944,9 @@ def explorar(j, frame=None, sem_mob=0):
     passo_estereo(j, tx, ty)
     return tx, ty, ok
 
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  MODO CAPTURAR
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def modo_capturar(hwnd, j):
     print()
@@ -1573,9 +1993,9 @@ def modo_capturar(hwnd, j):
     cv2.destroyAllWindows()
     print(f"\n  {total} template(s) em '{TEMPLATES_DIR}/'")
 
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  MODO VERIFICAR
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def modo_dataset(hwnd, j):
     pasta = os.path.join("datasets", "ro_mob", "images", "raw")
@@ -1702,28 +2122,46 @@ def modo_verificar(hwnd, j):
             break
     cv2.destroyAllWindows()
 
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  LOOP PRINCIPAL
-# ══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def loop(hwnd, j):
     global rodando, _ultimo_refresh, _explore_until, _explore_dest
+    global _alvo_lock, _alvo_lock_t   # mantidos por compatibilidade
+
+    # â”€â”€ Variaveis de estado â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    estado    = Estado.BUSCAR
+    alvo_pos  = None    # (ax, ay) do alvo atual
+    alvo_tid  = None    # track_id YOLO do alvo (None se tracking off)
+    alvo_t    = 0.0     # ultima vez que o alvo foi visto
+    kill_pos  = None    # posicao do ultimo kill (para loot)
+    ciclos    = 0       # ciclos de rotacao no alvo atual
 
     print()
     print("=" * 56)
-    print("  RO BOT — Rotacao inteligente")
+    print("  RO BOT â€” Estado-machine + YOLO Tracking")
     print(f"  Janela    : {j.title}  ({j.width}x{j.height})")
     print(f"  Templates : {len(templates)}")
     print(f"  Mapa visual: {'ON' if USAR_MAPA_VISUAL else 'OFF'}")
+    print(f"  Tracking  : {'ON' if USAR_YOLO_TRACKING else 'OFF'}")
     print(f"  Rotacao   : {' -> '.join(t for t,_ in ROTACAO)}")
-    print(f"  Max ciclos: {MAX_CICLOS_ATAQUE} por mob")
+    print(f"  Max ciclos: {MAX_CICLOS_ATAQUE}")
     print("-" * 56)
     print("  F12 = parar  |  mouse canto sup-esq = emergencia")
     print("=" * 56)
     print()
-    print("  Iniciando em 3s — clique na janela do jogo...")
+    print("  Iniciando em 3s â€” clique na janela do jogo...")
     time.sleep(3)
     focar(j)
+
+    # Inicia thread de scan assincrono
+    if SCAN_ASYNC_ATIVO and os.path.exists(YOLO_MODEL_PATH):
+        threading.Thread(target=_scan_worker, args=(hwnd, j), daemon=True).start()
+
+    # Inicia log visual
+    ts_sessao = datetime.now().strftime("%Y%m%d_%H%M%S")
+    vlog_iniciar(ts_sessao)
 
     inicio  = time.time()
     kills   = 0
@@ -1732,103 +2170,331 @@ def loop(hwnd, j):
 
     while rodando:
         try:
-            frame = capturar_cv(hwnd, j)
+            # Tenta usar frame pre-calculado pelo scan worker (zero-latencia)
+            scan = scan_pegar()
+            if scan:
+                frame, _scan_mobs_cache = scan
+            else:
+                frame = capturar_cv(hwnd, j)
+                _scan_mobs_cache = None
 
-            # ── Anti-jail ─────────────────────────────────
+            # â•â• Checks globais (todos os estados) â•â•â•â•â•â•â•â•â•â•
             motivo_jail = antijail_verificar(frame)
             if motivo_jail:
                 antijail_alertar(j, motivo_jail)
                 break
 
-            # ── Verificar HP/SP e usar pocoes ─────────────
             morto, tomou_dano = verificar_hp_sp(frame, j)
             if morto:
                 rodando = False
                 break
 
-            # ── Aviso de peso ──────────────────────────────
             if kills > 0 and kills % KILLS_AVISO_PESO == 0:
-                print(f"  [PESO]  {kills} kills — verifique o peso do inventario!")
+                print(f"  [PESO]  {kills} kills â€” verifique o peso!")
 
-            # ── Deteccao de stuck ──────────────────────────
-            if sem_mob >= 8 and _verificar_stuck():
-                print("  [STUCK] Personagem preso — forcando salto longo...")
-                if log: log.stuck()
-                if REFRESH_APOS_STUCK:
-                    forcar_refresh(j, "stuck")
-                _hist_explore.clear()
-                tx, ty, ok = explorar(j, frame, sem_mob=30)   # sem_mob alto = passo gigante
-                if log: log.explore(tx, ty, ok)
-                _explore_dest = (tx, ty)
-                _explore_until = time.time() + EXPLORAR_SETTLE_LONGO_S
-                continue
+            if REFRESH_PERIODICO_S and (time.time() - _ultimo_refresh) > REFRESH_PERIODICO_S:
+                forcar_refresh(j, "periodico_buscar")
 
-            mobs = detectar_mobs(frame, j)
-
-            # ── Ponto cego: mob colado no personagem ───────
-            # Se tomou dano mas nao ve mobs (mob dentro da mascara central),
-            # usa TAB do jogo para selecionar o alvo mais proximo e ataca.
-            if tomou_dano and not mobs:
-                print("  [DANO]  Mob no ponto cego — TAB + ataque!")
-                if log: log._w("BLIND_ATTACK", {})
-                focar(j)
-                pyautogui.press(TECLA_TAB)
-                time.sleep(0.08)
-                for tecla, delay in ROTACAO:
-                    if not rodando: break
-                    pyautogui.press(tecla)
-                    time.sleep(delay)
-
-            if mobs:
-                sem_mob = 0
-                _explore_until = 0.0
-                _explore_dest = None
-                ax, ay  = mobs[0]
-                qtd     = len(mobs)
-                if not dentro_da_janela(j, ax, ay):
-                    print(f"  [COORD] Alvo fora da janela: abs=({ax},{ay}) win=({j.left},{j.top},{j.right},{j.bottom})")
-                    if log: log.skip(ax, ay)
+            # Transiciona para RECUPERAR se recursos criticos
+            hp_atual = _ler_barra(frame, HP_BAR_Y, HP_BAR_X0, HP_BAR_X1)
+            sp_atual = _ler_barra(frame, SP_BAR_Y, SP_BAR_X0, SP_BAR_X1)
+            if estado not in (Estado.RECUPERAR, Estado.LOOT):
+                if hp_atual < HP_RECUPERAR_MIN or sp_atual < SP_RECUPERAR_MIN:
+                    print(f"  [â†’RECUPERAR] HP={hp_atual:.0%} SP={sp_atual:.0%}")
+                    estado   = Estado.RECUPERAR
+                    alvo_pos = None
                     continue
-                print(f"  [MOB] ({ax},{ay}) — {qtd} visivel(is)")
-                if log: log.mob(ax, ay, qtd)
-                parar_movimento(j)
-                ciclo_morte = combater_com_persistencia(hwnd, j, ax, ay)
 
-                if ciclo_morte == "blocked":
-                    print("  [PATH] Alvo ignorado por colisao/parede; sem refresh")
-                elif ciclo_morte:
-                    kills += 1
-                    if log: log.kill(ax, ay, ciclo_morte)
-                    print(f"  [KILL] #{kills}  ({int(time.time()-inicio)}s)")
-                    lotar_area(j, ax, ay)
-                    if log: log.loot(ax, ay)
-                elif ciclo_morte is False:
-                    refreshed = REFRESH_APOS_MISS and forcar_refresh(j, "miss")
-                    if refreshed:
-                        print("  [MISS] Refresh acionado; sem blacklist para possivel sprite fantasma")
-                    else:
-                        _blacklist_add(ax, ay)
-                        print(f"  [BL]   Posicao ({ax},{ay}) bloqueada por {BLACKLIST_TEMPO}s")
-                else:
-                    print("  [LOCK] Recalculando alvo no proximo frame; sem blacklist")
-
-            else:
+            # â•â• ESTADO: BUSCAR â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            if estado == Estado.BUSCAR:
                 sem_mob += 1
-                if REFRESH_PERIODICO_S and (time.time() - _ultimo_refresh) > REFRESH_PERIODICO_S:
-                    forcar_refresh(j, "periodico_buscar")
-                if time.time() < _explore_until:
+
+                # Ponto cego: dano sem mob visivel
+                if tomou_dano:
+                    if log: log._w("BLIND_ATTACK", {})
+                    focar(j)
+                    pyautogui.press(TECLA_TAB)
                     time.sleep(0.08)
+                    for tecla, delay in ROTACAO:
+                        if not rodando: break
+                        pyautogui.press(tecla)
+                        time.sleep(delay)
                     continue
-                if sem_mob % 5 == 0:
-                    if log: log.idle(sem_mob)
-                    print(f"  [BUSCAR] Explorando ({sem_mob}x sem mob)...")
-                tx, ty, ok = explorar(j, frame, sem_mob)
-                if log: log.explore(tx, ty, ok)
-                _explore_dest = (tx, ty)
-                _explore_until = time.time() + (EXPLORAR_SETTLE_LONGO_S if sem_mob > 20 else EXPLORAR_SETTLE_S)
+
+                # Stuck check
+                if sem_mob >= 8 and _verificar_stuck():
+                    print("  [STUCK] Forcando salto longo...")
+                    if log: log.stuck()
+                    if REFRESH_APOS_STUCK:
+                        forcar_refresh(j, "stuck")
+                    _hist_explore.clear()
+                    tx, ty, ok = explorar(j, frame, sem_mob=30)
+                    if log: log.explore(tx, ty, ok)
+                    _explore_dest  = (tx, ty)
+                    _explore_until = time.time() + EXPLORAR_SETTLE_LONGO_S
+                    continue
+
+                mobs = _scan_mobs_cache if _scan_mobs_cache is not None else detectar_mobs(frame, j)
+                if mobs:
+                    sem_mob = 0
+                    _explore_until = 0.0
+                    _explore_dest  = None
+
+                    # Prioriza mob com menor HP quando ha varios
+                    ax, ay = mobs[0]
+                    if len(mobs) > 1 and HP_BAR_MOB_ATIVO:
+                        mobs_hp = []
+                        for mx, my in mobs:
+                            hp_pct = detectar_hp_bar_mob(frame, j, mx, my)
+                            mobs_hp.append((hp_pct if hp_pct is not None else 1.0, mx, my))
+                        mobs_hp.sort(key=lambda m: m[0])
+                        ax, ay = mobs_hp[0][1], mobs_hp[0][2]
+                        if mobs_hp[0][0] < 1.0:
+                            print(f"  [HP-BAR] Alvo HP~{mobs_hp[0][0]:.0%} priorizado")
+
+                    if not dentro_da_janela(j, ax, ay):
+                        continue
+
+                    alvo_pos = (ax, ay)
+                    alvo_tid = _track_ids.get((ax, ay))
+                    alvo_t   = time.time()
+                    ciclos   = 0
+                    if log: log.mob(ax, ay, len(mobs))
+
+                    # Fast-path: mob ja em range \u2192 ATACAR direto, sem passar por APROXIMAR
+                    dist_imediata = distancia_do_personagem(j, ax, ay)
+                    vlog_frame(frame, j, "MOB",
+                               info=f"qtd={len(mobs)} dist={dist_imediata:.0f}px",
+                               mob_x=ax, mob_y=ay, estado_nome=estado.value)
+                    if dist_imediata <= COMBATE_RANGE_PX:
+                        print(f"  [BUSCAR\u2192ATACAR] ({ax},{ay}) ja em range ({dist_imediata:.0f}px) \u2014 ataque direto!")
+                        parar_movimento(j)
+                        estado = Estado.ATACAR
+                    else:
+                        print(f"  [BUSCAR\u2192APROXIMAR] ({ax},{ay}) dist={dist_imediata:.0f}px tid={alvo_tid}")
+                        parar_movimento(j)
+                        estado = Estado.APROXIMAR
+
+                else:
+                    if time.time() < _explore_until:
+                        time.sleep(0.08)
+                        continue
+                    if sem_mob % 5 == 0:
+                        if log: log.idle(sem_mob)
+                        print(f"  [BUSCAR] Explorando ({sem_mob}x sem mob)...")
+                    tx, ty, ok = explorar(j, frame, sem_mob)
+                    if log: log.explore(tx, ty, ok)
+                    _explore_dest  = (tx, ty)
+                    _explore_until = time.time() + (EXPLORAR_SETTLE_LONGO_S if sem_mob > 20 else EXPLORAR_SETTLE_S)
+
+            # â•â• ESTADO: APROXIMAR â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            elif estado == Estado.APROXIMAR:
+                ax, ay = alvo_pos
+
+                mobs = _scan_mobs_cache if _scan_mobs_cache is not None else detectar_mobs(frame, j)
+                novo = _rastrear_alvo(mobs, ax, ay, alvo_tid)
+                if novo:
+                    ax, ay   = novo
+                    alvo_pos = novo
+                    alvo_tid = _track_ids.get(novo, alvo_tid)
+                    alvo_t   = time.time()
+                elif time.time() - alvo_t > (ALVO_GRACE_BASE + distancia_do_personagem(j, ax, ay) / 100 * ALVO_GRACE_POR_100PX):
+                    grace_usada = ALVO_GRACE_BASE + distancia_do_personagem(j, ax, ay) / 100 * ALVO_GRACE_POR_100PX
+                    print(f"  [APROXIMAR\u2192BUSCAR] Alvo perdido apos {grace_usada:.1f}s (dist-escalado)")
+                    estado   = Estado.BUSCAR
+                    alvo_pos = None
+                    continue
+
+                dist = distancia_do_personagem(j, ax, ay)
+
+                # â”€â”€ Switch oportunista â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # Se apareceu mob muito mais perto que o alvo atual,
+                # troca imediatamente. Evita bot ir a 420px ignorando mob a 140px.
+                if mobs and dist > COMBATE_RANGE_PX:
+                    mx0, my0 = mobs[0]
+                    dist0 = distancia_do_personagem(j, mx0, my0)
+                    if (dist0 <= COMBATE_RANGE_PX or
+                            (dist0 < dist * ALVO_SWITCH_RATIO and
+                             dist - dist0 > ALVO_SWITCH_MIN_DIST)):
+                        ax, ay   = mx0, my0
+                        alvo_pos = (ax, ay)
+                        alvo_tid = _track_ids.get((ax, ay), alvo_tid)
+                        alvo_t   = time.time()
+                        _aprox_watch_reset()
+                        if dist0 <= COMBATE_RANGE_PX:
+                            print(f"  [SWITCH\u2192ATACAR] Mob em range ({dist0:.0f}px)!")
+                            estado = Estado.ATACAR
+                            continue
+                        print(f"  [SWITCH] Oportunista {dist0:.0f}px << {dist:.0f}px")
+                        dist = dist0
+
+                if dist <= COMBATE_RANGE_PX:
+                    print(f"  [APROXIMAR\u2192ATACAR] Em range ({dist:.0f}px)")
+                    _aprox_watch_reset()
+                    estado = Estado.ATACAR
+                    continue
+
+                if _aprox_watch_update(ax, ay, dist):
+                    print(f"  [APROXIMAR\u2192BUSCAR] Sem progresso; blacklist ({ax},{ay})")
+                    _blacklist_add(ax, ay)
+                    _aprox_watch_reset()
+                    if log: log.path(ax, ay, "aprox_watch")
+                    estado   = Estado.BUSCAR
+                    alvo_pos = None
+                    continue
+
+                waypoint = None
+                if COMBATE_USAR_WAYPOINT:
+                    waypoint = _waypoint_para_alvo(frame, j, ax, ay, dist)
+                if waypoint is None:
+                    if COMBATE_USAR_WAYPOINT:
+                        print(f"  [APROXIMAR\u2192BUSCAR] Sem caminho; blacklist ({ax},{ay})")
+                        _blacklist_add(ax, ay)
+                        if log: log.path(ax, ay, "sem_caminho")
+                        _aprox_watch_reset()
+                        estado   = Estado.BUSCAR
+                        alvo_pos = None
+                        continue
+                    cx = (j.left + j.right) // 2
+                    cy = (j.top  + j.bottom) // 2
+                    waypoint = (int(cx + (ax - cx) * COMBATE_APROX_FATOR),
+                                int(cy + (ay - cy) * COMBATE_APROX_FATOR))
+
+                if log: log.move(ax, ay)
+                _outros = [(mx,my) for mx,my in mobs if (mx,my) != (ax,ay)][:5]
+                vlog_frame(frame, j, "MOVE",
+                           info=f"dist={dist:.0f}px  wp=({waypoint[0]},{waypoint[1]})",
+                           mob_x=ax, mob_y=ay, estado_nome=estado.value,
+                           waypoint_xy=waypoint, outros_mobs=_outros)
+                passo_estereo(j, waypoint[0], waypoint[1])
+                _explore_until = max(_explore_until, time.time() + 0.85)
+                # Scan reativo: acorda a cada 100ms durante a caminhada.
+                # Se mob entrar em range antes do fim do settle, ataca imediatamente.
+                if _esperar_mob_range(hwnd, j, COMBATE_MOVE_SETTLE_S, ax, ay, alvo_tid):
+                    print(f"  [APROXIMARâ†’ATACAR] Mob entrou em range durante caminhada!")
+                    _aprox_watch_reset()
+                    estado = Estado.ATACAR
+
+            # â•â• ESTADO: ATACAR â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            elif estado == Estado.ATACAR:
+                ax, ay = alvo_pos
+
+                dist = distancia_do_personagem(j, ax, ay)
+                if dist > COMBATE_RANGE_PX:
+                    print(f"  [ATACARâ†’APROXIMAR] Fora de range ({dist:.0f}px)")
+                    _aprox_watch_reset()
+                    estado = Estado.APROXIMAR
+                    continue
+
+                mobs_pre = detectar_mobs(frame, j)
+                qtd_pre  = len(mobs_pre)
+
+                if qtd_pre == 0:
+                    novo_alvo, qtd = aguardar_reaquisicao(hwnd, j, ax, ay)
+                    if novo_alvo:
+                        ax, ay   = novo_alvo
+                        alvo_pos = novo_alvo
+                        alvo_t   = time.time()
+                        qtd_pre  = max(1, qtd)
+                    else:
+                        if ciclos == 0:
+                            print("  [ATACAR->BUSCAR] Alvo sumiu antes da primeira skill; sem kill")
+                            if log: log.skip(ax, ay)
+                            vlog_frame(frame, j, "PATH",
+                                       info="alvo sumiu antes da primeira skill",
+                                       mob_x=ax, mob_y=ay, estado_nome=estado.value)
+                            alvo_pos = None
+                            estado = Estado.BUSCAR
+                            continue
+                        print(f"  [ATACARâ†’LOOT] Mob sumiu â€” kill pre-animacao")
+                        kills   += 1
+                        kill_pos = (ax, ay)
+                        if log: log.kill(ax, ay, ciclos)
+                        vlog_frame(frame, j, "KILL",
+                                   info=f"kill pre-anim ciclo={ciclos} total={kills}",
+                                   mob_x=ax, mob_y=ay, estado_nome=estado.value)
+                        print(f"  [KILL] #{kills}  ({int(time.time()-inicio)}s)")
+                        ciclos    = 0
+                        alvo_pos  = None
+                        estado    = Estado.LOOT
+                        continue
+
+                novo = _rastrear_alvo(mobs_pre, ax, ay, alvo_tid)
+                if novo:
+                    ax, ay   = novo
+                    alvo_pos = novo
+                    alvo_tid = _track_ids.get(novo, alvo_tid)
+
+                ciclos += 1
+                if ciclos > MAX_CICLOS_ATAQUE:
+                    print(f"  [ATACARâ†’BUSCAR] Miss â€” {MAX_CICLOS_ATAQUE} ciclos")
+                    if log: log.miss(ax, ay)
+                    vlog_frame(frame, j, "PATH",
+                               info=f"MISS {ciclos} ciclos sem kill",
+                               mob_x=ax, mob_y=ay, estado_nome=estado.value)
+                    refreshed = REFRESH_APOS_MISS and forcar_refresh(j, "miss")
+                    if not refreshed:
+                        _blacklist_add(ax, ay)
+                        print(f"  [BL] ({ax},{ay}) bloqueado por {BLACKLIST_TEMPO}s")
+                    estado   = Estado.BUSCAR
+                    alvo_pos = None
+                    ciclos   = 0
+                    continue
+
+                vlog_frame(frame, j, "SKILL",
+                           info=f"ciclo={ciclos}  dist={dist:.0f}px",
+                           mob_x=ax, mob_y=ay, estado_nome=estado.value)
+                rotacao_skills(j, ciclos, ax, ay)
+                # Aguarda efeitos visuais de skill (cristais, explosoes) assentarem
+                # antes de checar kill â€” evita YOLO ver particulas como mobs vivos.
+                time.sleep(0.22)
+
+                frame_pos = capturar_cv(hwnd, j)
+                mobs_pos  = detectar_mobs(frame_pos, j)
+                qtd_pos   = len(mobs_pos)
+                alvo_vivo = _rastrear_alvo(mobs_pos, ax, ay, alvo_tid)
+
+                if qtd_pos < qtd_pre or not alvo_vivo:
+                    print(f"  [ATACARâ†’LOOT] Kill no ciclo {ciclos}!")
+                    kills   += 1
+                    kill_pos = (ax, ay)
+                    if log: log.kill(ax, ay, ciclos)
+                    vlog_frame(frame_pos, j, "KILL",
+                               info=f"ciclo={ciclos}  total={kills}",
+                               mob_x=ax, mob_y=ay, estado_nome=estado.value)
+                    print(f"  [KILL] #{kills}  ({int(time.time()-inicio)}s)")
+                    ciclos    = 0
+                    alvo_pos  = None
+                    estado    = Estado.LOOT
+                else:
+                    if alvo_vivo:
+                        ax, ay   = alvo_vivo
+                        alvo_pos = alvo_vivo
+                        alvo_tid = _track_ids.get(alvo_vivo, alvo_tid)
+
+            # â•â• ESTADO: LOOT â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            elif estado == Estado.LOOT:
+                if kill_pos:
+                    lotar_area(j, kill_pos[0], kill_pos[1])
+                    if log: log.loot(kill_pos[0], kill_pos[1])
+                    vlog_frame(frame, j, "LOOT",
+                               mob_x=kill_pos[0], mob_y=kill_pos[1],
+                               estado_nome=estado.value)
+                    kill_pos = None
+                estado = Estado.BUSCAR
+
+            # â•â• ESTADO: RECUPERAR â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            elif estado == Estado.RECUPERAR:
+                hp = _ler_barra(frame, HP_BAR_Y, HP_BAR_X0, HP_BAR_X1)
+                sp = _ler_barra(frame, SP_BAR_Y, SP_BAR_X0, SP_BAR_X1)
+                if hp >= HP_RECUPERAR_MIN and sp >= SP_RECUPERAR_MIN:
+                    print(f"  [RECUPERARâ†’BUSCAR] HP={hp:.0%} SP={sp:.0%} â€” retomando")
+                    estado = Estado.BUSCAR
+                else:
+                    time.sleep(0.4)
 
         except pyautogui.FailSafeException:
-            print("[STOP] Mouse no canto — encerrado.")
+            print("[STOP] Mouse no canto â€” encerrado.")
             rodando = False
         except Exception as e:
             print(f"[ERRO] {type(e).__name__}: {e}")
@@ -1837,8 +2503,10 @@ def loop(hwnd, j):
     t = int(time.time() - inicio)
     print(f"\n  Encerrado: {t//60}m {t%60}s  |  {kills} kills")
     if log: log.fim(kills, t)
+    vlog_finalizar()
 
-# ── teclado ───────────────────────────────────────────────
+
+# â”€â”€ teclado â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def monitor():
     global rodando
@@ -1851,7 +2519,7 @@ def monitor():
     except Exception:
         pass
 
-# ── main ──────────────────────────────────────────────────
+# â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 if __name__ == "__main__":
     j    = pegar_janela()
@@ -1879,4 +2547,4 @@ if __name__ == "__main__":
             loop(hwnd, j)
         except KeyboardInterrupt:
             rodando = False
-            print("  Ctrl+C — encerrado.")
+            print("  Ctrl+C â€” encerrado.")

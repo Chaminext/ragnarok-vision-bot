@@ -8,6 +8,7 @@ env/
 
 # Runtime logs and debug output
 ro_log_*.log
+visual_log/
 *.cache
 
 # Trained weights / downloaded base models
