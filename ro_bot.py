@@ -49,6 +49,8 @@ DELAY_PASSO       = 0.18
 DELAY_LOOT        = 0.15
 EXPLORAR_SETTLE_S = 1.25
 EXPLORAR_SETTLE_LONGO_S = 1.65
+BUSCAR_SEM_MOB_RECHECK_S = 0.14
+POS_LOOT_SETTLE_S = 0.35
 
 # Persistencia de alvo: YOLO pode piscar durante movimento/animacao. Nao
 # transforme 1 frame sem bbox em SKIP+blacklist.
@@ -2348,6 +2350,13 @@ def loop(hwnd, j):
                     if time.time() < _explore_until:
                         time.sleep(0.08)
                         continue
+                    if BUSCAR_SEM_MOB_RECHECK_S > 0:
+                        time.sleep(BUSCAR_SEM_MOB_RECHECK_S)
+                        frame_retry = capturar_cv(hwnd, j)
+                        mobs_retry = detectar_mobs(frame_retry, j)
+                        if mobs_retry:
+                            # YOLO piscou por 1 frame; evita clique de exploracao desnecessario.
+                            continue
                     if sem_mob % 5 == 0:
                         if log: log.idle(sem_mob)
                         print(f"  [BUSCAR] Explorando ({sem_mob}x sem mob)...")
@@ -2553,6 +2562,7 @@ def loop(hwnd, j):
                                mob_x=kill_pos[0], mob_y=kill_pos[1],
                                estado_nome=estado.value)
                     kill_pos = None
+                _explore_until = max(_explore_until, time.time() + POS_LOOT_SETTLE_S)
                 estado = Estado.BUSCAR
 
             # â•â• ESTADO: RECUPERAR â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
