@@ -61,6 +61,8 @@ PROCESS_VM_READ = 0x0010
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 TH32CS_SNAPPROCESS = 0x00000002
+TH32CS_SNAPMODULE = 0x00000008
+TH32CS_SNAPMODULE32 = 0x00000010
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 MAX_PATH = 260
 
@@ -84,12 +86,31 @@ class PROCESSENTRY32W(ctypes.Structure):
     ]
 
 
+class MODULEENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("th32ModuleID", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("GlblcntUsage", wintypes.DWORD),
+        ("ProccntUsage", wintypes.DWORD),
+        ("modBaseAddr", ctypes.POINTER(ctypes.c_byte)),
+        ("modBaseSize", wintypes.DWORD),
+        ("hModule", wintypes.HMODULE),
+        ("szModule", wintypes.WCHAR * 256),
+        ("szExePath", wintypes.WCHAR * MAX_PATH),
+    ]
+
+
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
 kernel32.Process32FirstW.restype = wintypes.BOOL
 kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
 kernel32.Process32NextW.restype = wintypes.BOOL
+kernel32.Module32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32W)]
+kernel32.Module32FirstW.restype = wintypes.BOOL
+kernel32.Module32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32W)]
+kernel32.Module32NextW.restype = wintypes.BOOL
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.ReadProcessMemory.argtypes = [
@@ -173,6 +194,47 @@ def find_process_by_window_title(title_substring: str) -> tuple[int, str]:
     return found["pid"], f"window:{found['title']}"
 
 
+def iter_modules(pid: int) -> list[dict]:
+    flags = TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32
+    snap = kernel32.CreateToolhelp32Snapshot(flags, pid)
+    if snap == INVALID_HANDLE_VALUE:
+        raise winerr("CreateToolhelp32Snapshot modules failed")
+    modules = []
+    try:
+        entry = MODULEENTRY32W()
+        entry.dwSize = ctypes.sizeof(MODULEENTRY32W)
+        ok = kernel32.Module32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            base = ctypes.cast(entry.modBaseAddr, ctypes.c_void_p).value or 0
+            modules.append({
+                "name": entry.szModule,
+                "path": entry.szExePath,
+                "base": base,
+                "base_hex": f"0x{base:X}",
+                "size": int(entry.modBaseSize),
+            })
+            ok = kernel32.Module32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snap)
+    return modules
+
+
+def choose_module_base(pid: int, module_name: str = "") -> tuple[int, str]:
+    modules = iter_modules(pid)
+    if not modules:
+        return 0, ""
+    if module_name:
+        wanted = module_name.lower()
+        for module in modules:
+            if module["name"].lower() == wanted:
+                return module["base"], module["name"]
+        for module in modules:
+            if wanted in module["name"].lower() or wanted in module["path"].lower():
+                return module["base"], module["name"]
+    first = modules[0]
+    return first["base"], first["name"]
+
+
 class Memory:
     def __init__(self, pid: int):
         access = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION
@@ -223,15 +285,20 @@ def safe(call, default=None):
 
 
 class ROProbe:
-    def __init__(self, mem: Memory, max_actors: int = 500):
+    def __init__(self, mem: Memory, max_actors: int = 500, address_base: int = 0, base_name: str = "absolute"):
         self.mem = mem
         self.max_actors = max_actors
+        self.address_base = address_base
+        self.base_name = base_name
+
+    def addr(self, offset: int) -> int:
+        return self.address_base + offset
 
     def manager(self) -> int:
-        init = self.mem.u32(SINGLETON_BASE + OFFSET_INIT_FLAG)
+        init = self.mem.u32(self.addr(SINGLETON_BASE) + OFFSET_INIT_FLAG)
         if init != 1:
             return 0
-        return self.mem.u32(SINGLETON_BASE + OFFSET_MANAGER_PTR)
+        return self.mem.u32(self.addr(SINGLETON_BASE) + OFFSET_MANAGER_PTR)
 
     def local_actor(self) -> int:
         mgr = self.manager()
@@ -255,15 +322,15 @@ class ROProbe:
         return self.mem.i32(actor + ACTOR_SCREEN_X), self.mem.i32(actor + ACTOR_SCREEN_Y)
 
     def player(self) -> dict:
-        hp = safe(lambda: self.mem.i32(LOCAL_HP), 0)
-        sp = safe(lambda: self.mem.i32(LOCAL_SP), 0)
-        max_hp = safe(lambda: self.mem.i32(LOCAL_MAXHP), 0)
-        max_sp = safe(lambda: self.mem.i32(LOCAL_MAXSP), 0)
+        hp = safe(lambda: self.mem.i32(self.addr(LOCAL_HP)), 0)
+        sp = safe(lambda: self.mem.i32(self.addr(LOCAL_SP)), 0)
+        max_hp = safe(lambda: self.mem.i32(self.addr(LOCAL_MAXHP)), 0)
+        max_sp = safe(lambda: self.mem.i32(self.addr(LOCAL_MAXSP)), 0)
         wx, wy = safe(self.player_world, (0.0, 0.0))
         sx, sy = safe(self.player_screen, (0, 0))
         return {
-            "gid": safe(lambda: self.mem.u32(LOCAL_PLAYER_GID), 0),
-            "aid": safe(lambda: self.mem.u32(LOCAL_PLAYER_AID), 0),
+            "gid": safe(lambda: self.mem.u32(self.addr(LOCAL_PLAYER_GID)), 0),
+            "aid": safe(lambda: self.mem.u32(self.addr(LOCAL_PLAYER_AID)), 0),
             "hp": hp,
             "max_hp": max_hp,
             "hp_pct": round(hp / max_hp, 4) if max_hp else None,
@@ -285,7 +352,7 @@ class ROProbe:
         if not head_ptr:
             return []
         cur_ptr = self.mem.u32(head_ptr)
-        local_gid = safe(lambda: self.mem.u32(LOCAL_PLAYER_GID), 0)
+        local_gid = safe(lambda: self.mem.u32(self.addr(LOCAL_PLAYER_GID)), 0)
         pwx, pwy = safe(self.player_world, (0.0, 0.0))
 
         actors = []
@@ -336,7 +403,8 @@ class ROProbe:
         return {
             "ok": True,
             "ts": time.time(),
-            "map": safe(lambda: self.mem.string(LOCAL_MAP_NAME, 24), ""),
+            "address_base": {"name": self.base_name, "base": f"0x{self.address_base:X}"},
+            "map": safe(lambda: self.mem.string(self.addr(LOCAL_MAP_NAME), 24), ""),
             "manager": f"0x{safe(self.manager, 0):X}",
             "player": self.player(),
             "counts": counts,
@@ -355,6 +423,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pid", type=int, default=0, help="use a specific PID")
     parser.add_argument("--window-title", default="4th | Gepard", help="fallback window title substring")
     parser.add_argument("--list-processes", action="store_true", help="print process list and exit")
+    parser.add_argument("--list-modules", action="store_true", help="print modules for the target process and exit")
+    parser.add_argument("--module", default="", help="module name to use with --base module")
+    parser.add_argument("--base", choices=["auto", "absolute", "module"], default="auto")
     parser.add_argument("--include", choices=["none", "mobs", "visible", "all"], default="mobs")
     parser.add_argument("--max-actors", type=int, default=500)
     parser.add_argument("--watch", type=float, default=0.0, help="repeat every N seconds")
@@ -379,7 +450,40 @@ def main() -> int:
             except RuntimeError:
                 pid, exe = find_process_by_window_title(args.window_title)
         mem = Memory(pid)
-        probe = ROProbe(mem, max_actors=args.max_actors)
+
+        if args.list_modules:
+            modules = iter_modules(pid)
+            print(json.dumps({
+                "process": {"pid": pid, "name": exe},
+                "modules": modules,
+            }, ensure_ascii=False, indent=2 if args.pretty else None))
+            return 0
+
+        probes = []
+        if args.base in ("auto", "absolute"):
+            probes.append(ROProbe(mem, max_actors=args.max_actors, address_base=0, base_name="absolute"))
+        if args.base in ("auto", "module"):
+            module_base, module_name = choose_module_base(pid, args.module)
+            probes.append(ROProbe(
+                mem,
+                max_actors=args.max_actors,
+                address_base=module_base,
+                base_name=module_name or "module",
+            ))
+
+        probe = probes[0]
+        if args.base == "auto" and len(probes) > 1:
+            for candidate in probes:
+                snap_test = candidate.snapshot(include="none")
+                player = snap_test.get("player", {})
+                if (
+                    snap_test.get("manager") != "0x0"
+                    or snap_test.get("map")
+                    or player.get("max_hp")
+                    or player.get("gid")
+                ):
+                    probe = candidate
+                    break
 
         while True:
             snap = probe.snapshot(include=args.include)

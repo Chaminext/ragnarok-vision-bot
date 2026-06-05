@@ -19,6 +19,7 @@ python tools\memory_probe\ro_memory_probe.py --pretty --include mobs
 ```
 
 Ele tenta encontrar primeiro por nomes comuns de processo. Se nao achar, tenta pela janela `4th | Gepard`.
+Por padrao usa `--base auto`: testa offsets absolutos e depois `base_do_modulo + offset`.
 
 Ou:
 
@@ -49,6 +50,20 @@ Depois rode apontando pelo nome ou PID:
 ```powershell
 python tools\memory_probe\ro_memory_probe.py --process NomeDoClient.exe --pretty
 python tools\memory_probe\ro_memory_probe.py --pid 1234 --pretty
+```
+
+## Ver modulos carregados
+
+Use isto quando `manager` vier `0x0`:
+
+```powershell
+python tools\memory_probe\ro_memory_probe.py --list-modules --pretty
+```
+
+Depois teste forçando o modulo principal:
+
+```powershell
+python tools\memory_probe\ro_memory_probe.py --base module --module ragna4th.exe --pretty --include mobs
 ```
 
 ## Como saber se deu certo
